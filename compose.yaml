@@ -1,0 +1,24 @@
+name: bankcore
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bankcore}
+      POSTGRES_USER: ${POSTGRES_USER:-bankcore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bankcore-local}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - bankcore-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  bankcore-postgres-data:
+
