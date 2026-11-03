@@ -27,12 +27,12 @@ class BankCoreApplicationTests {
     private JdbcTemplate jdbcTemplate;
 
     @Test
-    void contextStartsAndFlywayBaselineIsApplied() {
+    void contextStartsAndAllMigrationsAreApplied() {
         assertThat(flyway.info().current()).isNotNull();
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("1");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("2");
 
         Integer successfulMigrations = jdbcTemplate.queryForObject(
                 "select count(*) from flyway_schema_history where success", Integer.class);
-        assertThat(successfulMigrations).isEqualTo(1);
+        assertThat(successfulMigrations).isEqualTo(2);
     }
 }
