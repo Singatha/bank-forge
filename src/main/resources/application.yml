@@ -52,4 +52,6 @@ bankcore:
     jwt-secret: ${JWT_SECRET:local-development-only-bankcore-jwt-secret-change-before-production-2026}
     access-token-ttl: ${ACCESS_TOKEN_TTL:15m}
     refresh-token-ttl: ${REFRESH_TOKEN_TTL:30d}
+  features:
+    development-funding-enabled: ${DEVELOPMENT_FUNDING_ENABLED:false}
 

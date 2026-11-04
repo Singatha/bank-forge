@@ -2,7 +2,7 @@
 
 BankCore is a portfolio-quality, simulated online banking backend for learning backend engineering. It does not connect to banks, move real money, collect real banking credentials, or claim regulatory compliance.
 
-Milestone 2 adds the identity and access foundation: registration, login, short-lived JWT access tokens, rotating refresh-token sessions, logout, and role-based authorization. Banking domain behavior remains intentionally deferred.
+Milestone 3 adds simulated customer profiles and ZAR checking/savings accounts with ownership-aware authorization, account lifecycle states, balances, and an explicitly gated development-funding mechanism. Transfers remain intentionally deferred.
 
 ## Architecture
 
@@ -13,7 +13,11 @@ flowchart LR
     Client[API Client] --> API[Spring Boot API]
     API --> Shared[Shared HTTP foundation]
     API --> Auth[Auth module]
+    API --> Customer[Customer module]
+    API --> Account[Account module]
     Auth --> DB[(PostgreSQL)]
+    Customer --> DB
+    Account --> DB
     Flyway[Flyway migrations] --> DB
 ```
 
@@ -39,7 +43,7 @@ com.bankcore
 
 Features gain `api`, `application`, `domain`, and `infrastructure` packages as their functionality is implemented. Empty layers are not created speculatively.
 
-See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision and [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model.
+See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, and [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access and simulated funding.
 
 ## Technology
 
@@ -74,6 +78,12 @@ Start the application:
 mvn spring-boot:run
 ```
 
+To expose the simulated funding endpoint during local development, opt in explicitly:
+
+```bash
+DEVELOPMENT_FUNDING_ENABLED=true mvn spring-boot:run
+```
+
 The default database connection is `jdbc:postgresql://localhost:5432/bankcore`, with local-only username `bankcore` and password `bankcore-local`. All values can be overridden with environment variables shown in `.env.example`.
 
 The checked-in JWT secret is strictly a local-development default. Set a random secret of at least 32 UTF-8 bytes through `JWT_SECRET` in every shared or deployed environment. Access and refresh lifetimes default to 15 minutes and 30 days and can be overridden with `ACCESS_TOKEN_TTL` and `REFRESH_TOKEN_TTL`.
@@ -100,6 +110,13 @@ docker compose down
 | Logout session | `POST http://localhost:8080/api/v1/auth/logout` |
 | Current identity | `GET http://localhost:8080/api/v1/auth/me` |
 | ADMIN authorization check | `GET http://localhost:8080/api/v1/auth/admin-check` |
+| Create customer profile | `POST http://localhost:8080/api/v1/customers` |
+| Current customer profile | `GET http://localhost:8080/api/v1/customers/me` |
+| Open account | `POST http://localhost:8080/api/v1/accounts` |
+| List accessible accounts | `GET http://localhost:8080/api/v1/accounts` |
+| Get account | `GET http://localhost:8080/api/v1/accounts/{accountId}` |
+| Get balance | `GET http://localhost:8080/api/v1/accounts/{accountId}/balance` |
+| Simulated funding (opt-in) | `POST http://localhost:8080/api/v1/development/accounts/{accountId}/fund` |
 
 Every HTTP response includes an `X-Request-ID`. A valid UUID supplied by the client is propagated; otherwise the API generates one.
 
@@ -121,6 +138,16 @@ Login returns a `Bearer` access token and an opaque refresh token. Send the acce
 - Refreshing rotates the token under a database row lock. Reuse of a rotated token revokes its entire token family.
 - Logout revokes the refresh-token family. A previously issued access token remains valid only until its short expiry unless the user is disabled or its token version changes.
 - New registrations receive `CUSTOMER`; `SUPPORT` and `ADMIN` roles are seeded for later administrative workflows.
+
+## Customers and accounts
+
+An authenticated `CUSTOMER` creates one profile before opening an account. Profiles start as `ACTIVE` because BankCore does not perform real identity verification or collect identity documents. The model also supports `PENDING`, `SUSPENDED`, and `CLOSED` for later lifecycle workflows.
+
+Accounts support `CHECKING` and `SAVINGS`, use ZAR, start at `0.00`, and receive a generated `BC`-prefixed identifier that deliberately does not mimic real bank numbering. Balances use `BigDecimal` and PostgreSQL `numeric(19,2)`. Account states are `ACTIVE`, `FROZEN`, and `CLOSED`.
+
+Customers can list and retrieve only their own accounts. A lookup for another customer's account returns `ACCOUNT_NOT_FOUND` to avoid disclosing its existence. `SUPPORT` and `ADMIN` have explicit read access; only an owner or `ADMIN` may invoke development funding.
+
+Development funding is disabled by default. When `DEVELOPMENT_FUNDING_ENABLED=true`, the endpoint can credit positive simulated amounts to an active account. It uses a database row lock to avoid lost updates, but it is not a deposit or real payment API and must never be enabled in a production-like environment.
 
 ## Error contract
 
@@ -145,7 +172,7 @@ Errors never expose stack traces or database messages. Validation errors add an 
 
 ## Database migrations
 
-Migrations live in `src/main/resources/db/migration`. `V1__baseline.sql` establishes the baseline and `V2__create_identity_schema.sql` owns users, roles, role assignments, and refresh-token sessions. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
+Migrations live in `src/main/resources/db/migration`. `V1__baseline.sql` establishes the baseline, `V2__create_identity_schema.sql` owns identity data, and `V3__create_customer_and_account_schema.sql` owns customer profiles and accounts. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
 
 ## Tests
 
@@ -155,7 +182,7 @@ Run all tests with:
 mvn verify
 ```
 
-Unit/web tests cover the health contract, validation-error contract, and request-ID behavior. PostgreSQL Testcontainers tests verify schema version 2 plus registration, BCrypt persistence, login failures, JWT access, role denial, refresh-token rotation and reuse detection, logout, disabled-user invalidation, and security error responses. Container-backed tests are skipped only when Docker is unavailable.
+Unit/web tests cover the health contract, validation-error contract, and request-ID behavior. PostgreSQL Testcontainers tests verify schema version 3, authentication, profile uniqueness, account creation and reads, owner isolation, staff access, simulated funding, precise balance accumulation, and frozen-account behavior. Container-backed tests are skipped only when Docker is unavailable.
 
 ## Milestone 1 acceptance criteria
 
@@ -178,3 +205,14 @@ Unit/web tests cover the health contract, validation-error contract, and request
 - [x] Disabled users and stale token versions cannot use previously issued access tokens.
 - [x] Public and protected routes return the shared safe error contract.
 - [x] PostgreSQL-backed authentication integration tests pass.
+
+## Milestone 3 acceptance criteria
+
+- [x] Authenticated users can create and retrieve one customer profile.
+- [x] Active customers can open `CHECKING` and `SAVINGS` accounts in ZAR.
+- [x] Accounts expose system-generated simulated numbers, balances, status, and version.
+- [x] Customers can list, retrieve, and inspect balances only for owned accounts.
+- [x] `SUPPORT` and `ADMIN` have explicit account read access.
+- [x] Development funding is disabled by default, ownership-aware, and rejects inactive accounts.
+- [x] Database constraints enforce statuses, currencies, non-negative balances, relationships, and uniqueness.
+- [x] PostgreSQL-backed customer/account integration tests pass.
