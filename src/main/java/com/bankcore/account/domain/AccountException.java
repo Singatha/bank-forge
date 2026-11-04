@@ -22,7 +22,12 @@ public final class AccountException extends ApiException {
 
     public static AccountException currencyMismatch() {
         return new AccountException(HttpStatus.BAD_REQUEST, "CURRENCY_MISMATCH",
-                "The funding currency must match the account currency.");
+                "The operation currency must match the account currency.");
+    }
+
+    public static AccountException insufficientFunds() {
+        return new AccountException(HttpStatus.UNPROCESSABLE_CONTENT, "INSUFFICIENT_FUNDS",
+                "The source account does not have sufficient funds.");
     }
 
     public static AccountException invalidFundingAmount() {

@@ -109,16 +109,49 @@ public class Account {
     }
 
     public void applyDevelopmentFunding(BigDecimal amount, Currency fundingCurrency, Instant now) {
-        if (status != AccountStatus.ACTIVE) {
-            throw AccountException.accountNotActive();
-        }
-        if (currency != fundingCurrency) {
-            throw AccountException.currencyMismatch();
-        }
+        validateActiveAndCurrency(fundingCurrency);
         if (amount == null || amount.signum() <= 0 || amount.scale() > 2) {
             throw AccountException.invalidFundingAmount();
         }
         availableBalance = availableBalance.add(amount).setScale(2, RoundingMode.UNNECESSARY);
         updatedAt = now;
+    }
+
+    public void validateTransferDebit(BigDecimal amount, Currency transferCurrency) {
+        validateActiveAndCurrency(transferCurrency);
+        validateTransferAmount(amount);
+        if (availableBalance.compareTo(amount) < 0) {
+            throw AccountException.insufficientFunds();
+        }
+    }
+
+    public void validateTransferCredit(BigDecimal amount, Currency transferCurrency) {
+        validateActiveAndCurrency(transferCurrency);
+        validateTransferAmount(amount);
+    }
+
+    public void applyTransferDebit(BigDecimal amount, Instant now) {
+        availableBalance = availableBalance.subtract(amount).setScale(2, RoundingMode.UNNECESSARY);
+        updatedAt = now;
+    }
+
+    public void applyTransferCredit(BigDecimal amount, Instant now) {
+        availableBalance = availableBalance.add(amount).setScale(2, RoundingMode.UNNECESSARY);
+        updatedAt = now;
+    }
+
+    private void validateActiveAndCurrency(Currency operationCurrency) {
+        if (status != AccountStatus.ACTIVE) {
+            throw AccountException.accountNotActive();
+        }
+        if (currency != operationCurrency) {
+            throw AccountException.currencyMismatch();
+        }
+    }
+
+    private void validateTransferAmount(BigDecimal amount) {
+        if (amount == null || amount.signum() <= 0 || amount.scale() > 2) {
+            throw new IllegalArgumentException("Transfer amount must be positive with at most two decimal places");
+        }
     }
 }

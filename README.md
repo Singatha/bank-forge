@@ -2,7 +2,7 @@
 
 BankCore is a portfolio-quality, simulated online banking backend for learning backend engineering. It does not connect to banks, move real money, collect real banking credentials, or claim regulatory compliance.
 
-Milestone 3 adds simulated customer profiles and ZAR checking/savings accounts with ownership-aware authorization, account lifecycle states, balances, and an explicitly gated development-funding mechanism. Transfers remain intentionally deferred.
+Milestone 4 adds atomic simulated transfers between ZAR accounts, explicit transfer states, insufficient-funds handling, owner-aware transfer history, and rollback guarantees. Ledger entries remain intentionally deferred to Milestone 5.
 
 ## Architecture
 
@@ -15,9 +15,11 @@ flowchart LR
     API --> Auth[Auth module]
     API --> Customer[Customer module]
     API --> Account[Account module]
+    API --> Transfer[Transfer module]
     Auth --> DB[(PostgreSQL)]
     Customer --> DB
     Account --> DB
+    Transfer --> DB
     Flyway[Flyway migrations] --> DB
 ```
 
@@ -43,7 +45,7 @@ com.bankcore
 
 Features gain `api`, `application`, `domain`, and `infrastructure` packages as their functionality is implemented. Empty layers are not created speculatively.
 
-See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, and [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access and simulated funding.
+See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, and [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries.
 
 ## Technology
 
@@ -117,6 +119,9 @@ docker compose down
 | Get account | `GET http://localhost:8080/api/v1/accounts/{accountId}` |
 | Get balance | `GET http://localhost:8080/api/v1/accounts/{accountId}/balance` |
 | Simulated funding (opt-in) | `POST http://localhost:8080/api/v1/development/accounts/{accountId}/fund` |
+| Create transfer | `POST http://localhost:8080/api/v1/transfers` |
+| List visible transfers | `GET http://localhost:8080/api/v1/transfers` |
+| Get transfer | `GET http://localhost:8080/api/v1/transfers/{transferId}` |
 
 Every HTTP response includes an `X-Request-ID`. A valid UUID supplied by the client is propagated; otherwise the API generates one.
 
@@ -149,6 +154,23 @@ Customers can list and retrieve only their own accounts. A lookup for another cu
 
 Development funding is disabled by default. When `DEVELOPMENT_FUNDING_ENABLED=true`, the endpoint can credit positive simulated amounts to an active account. It uses a database row lock to avoid lost updates, but it is not a deposit or real payment API and must never be enabled in a production-like environment.
 
+## Transfer flow
+
+A customer can transfer positive ZAR amounts from an owned active account to another active account. Source and destination must differ, both currencies must match, and the source must have sufficient funds.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> PROCESSING
+    PROCESSING --> COMPLETED
+    PROCESSING --> FAILED
+    COMPLETED --> REVERSED
+```
+
+The service creates the transfer, validates both accounts, debits the source, credits the destination, and completes the transfer inside one database transaction. An infrastructure failure rolls back the transfer and both balance changes. Expected business failures are recorded as `FAILED` transfers while balances remain unchanged.
+
+Customers can see outgoing and incoming transfers connected to their accounts. Other customers receive `TRANSFER_NOT_FOUND`; `SUPPORT` and `ADMIN` have explicit read access. Account version columns detect conflicting updates, but the final locking/retry policy and concurrent-transfer tests belong to Milestone 6.
+
 ## Error contract
 
 Errors never expose stack traces or database messages. Validation errors add an `errors` array to this base contract:
@@ -172,7 +194,7 @@ Errors never expose stack traces or database messages. Validation errors add an 
 
 ## Database migrations
 
-Migrations live in `src/main/resources/db/migration`. `V1__baseline.sql` establishes the baseline, `V2__create_identity_schema.sql` owns identity data, and `V3__create_customer_and_account_schema.sql` owns customer profiles and accounts. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
+Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, and `V4__create_transfer_schema.sql` owns transfers and their database invariants. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
 
 ## Tests
 
@@ -182,7 +204,7 @@ Run all tests with:
 mvn verify
 ```
 
-Unit/web tests cover the health contract, validation-error contract, and request-ID behavior. PostgreSQL Testcontainers tests verify schema version 3, authentication, profile uniqueness, account creation and reads, owner isolation, staff access, simulated funding, precise balance accumulation, and frozen-account behavior. Container-backed tests are skipped only when Docker is unavailable.
+Unit/web tests cover HTTP contracts, request IDs, and transfer-state invariants. PostgreSQL Testcontainers tests verify schema version 4, authentication, customers/accounts, successful transfers, validation, insufficient funds, frozen accounts, ownership, history visibility, precise balances, and full database rollback. Container-backed tests are skipped only when Docker is unavailable.
 
 ## Milestone 1 acceptance criteria
 
@@ -216,3 +238,14 @@ Unit/web tests cover the health contract, validation-error contract, and request
 - [x] Development funding is disabled by default, ownership-aware, and rejects inactive accounts.
 - [x] Database constraints enforce statuses, currencies, non-negative balances, relationships, and uniqueness.
 - [x] PostgreSQL-backed customer/account integration tests pass.
+
+## Milestone 4 acceptance criteria
+
+- [x] Customers can create simulated ZAR transfers from owned accounts.
+- [x] Source debit, destination credit, and transfer completion share one transaction.
+- [x] Insufficient funds and inactive accounts leave balances unchanged.
+- [x] Transfer states enforce valid transitions and reject invalid transitions.
+- [x] Source/destination, amount, currency, ownership, and account status are validated.
+- [x] Outgoing and incoming transfer history respects account ownership.
+- [x] Database constraints enforce positive amounts, distinct accounts, states, and failure/completion fields.
+- [x] Unit and PostgreSQL integration tests prove success, failure, and rollback behavior.
