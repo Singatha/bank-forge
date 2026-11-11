@@ -20,6 +20,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import com.bankcore.shared.web.RequestIdFilter;
 
@@ -51,6 +52,13 @@ public class GlobalExceptionHandler {
     ResponseEntity<ApiError> handleUnreadableBody(HttpMessageNotReadableException exception,
                                                    HttpServletRequest request) {
         return response(HttpStatus.BAD_REQUEST, "MALFORMED_REQUEST", "The request body is malformed.", request);
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    ResponseEntity<ApiError> handleArgumentTypeMismatch(MethodArgumentTypeMismatchException exception,
+                                                        HttpServletRequest request) {
+        return response(HttpStatus.BAD_REQUEST, "INVALID_REQUEST_PARAMETER",
+                "A request parameter has an invalid value.", request);
     }
 
     @ExceptionHandler(NoResourceFoundException.class)

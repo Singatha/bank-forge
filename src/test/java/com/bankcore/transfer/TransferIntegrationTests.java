@@ -176,13 +176,13 @@ class TransferIntegrationTests {
 
         mockMvc.perform(get("/api/v1/transfers").header("Authorization", bearer(source.token())))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1));
+                .andExpect(jsonPath("$.content.length()").value(1));
         mockMvc.perform(get("/api/v1/transfers").header("Authorization", bearer(destination.token())))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1));
+                .andExpect(jsonPath("$.content.length()").value(1));
         mockMvc.perform(get("/api/v1/transfers").header("Authorization", bearer(stranger.token())))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(0));
+                .andExpect(jsonPath("$.content.length()").value(0));
         mockMvc.perform(get("/api/v1/transfers/{id}", transferId)
                         .header("Authorization", bearer(stranger.token())))
                 .andExpect(status().isNotFound())
@@ -204,17 +204,17 @@ class TransferIntegrationTests {
         mockMvc.perform(get("/api/v1/accounts/{id}/transactions", source.accountId())
                         .header("Authorization", bearer(source.token())))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$[0].transferId").value(transferId))
-                .andExpect(jsonPath("$[0].entryType").value("DEBIT"))
-                .andExpect(jsonPath("$[0].amount").value(35.75))
-                .andExpect(jsonPath("$[0].transferReference").value(
+                .andExpect(jsonPath("$.content.length()").value(1))
+                .andExpect(jsonPath("$.content[0].transferId").value(transferId))
+                .andExpect(jsonPath("$.content[0].entryType").value("DEBIT"))
+                .andExpect(jsonPath("$.content[0].amount").value(35.75))
+                .andExpect(jsonPath("$.content[0].transferReference").value(
                         org.hamcrest.Matchers.startsWith("TR")));
 
         mockMvc.perform(get("/api/v1/accounts/{id}/transactions", destination.accountId())
                         .header("Authorization", bearer(destination.token())))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].entryType").value("CREDIT"));
+                .andExpect(jsonPath("$.content[0].entryType").value("CREDIT"));
 
         mockMvc.perform(get("/api/v1/accounts/{id}/transactions", source.accountId())
                         .header("Authorization", bearer(stranger.token())))
@@ -329,6 +329,7 @@ class TransferIntegrationTests {
             String token, String sourceId, String destinationId, String amount) throws Exception {
         return mockMvc.perform(post("/api/v1/transfers")
                 .header("Authorization", bearer(token))
+                .header("Idempotency-Key", UUID.randomUUID().toString())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(transferJson(sourceId, destinationId, amount, "ZAR")));
     }

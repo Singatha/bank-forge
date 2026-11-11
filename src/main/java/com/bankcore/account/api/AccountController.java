@@ -1,6 +1,5 @@
 package com.bankcore.account.api;
 
-import java.util.List;
 import java.util.UUID;
 
 import jakarta.validation.Valid;
@@ -19,8 +18,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.data.domain.Sort;
 
 import com.bankcore.account.application.AccountService;
+import com.bankcore.shared.api.PageRequests;
+import com.bankcore.shared.api.PageResponse;
 
 @RestController
 @RequestMapping("/api/v1/accounts")
@@ -46,10 +49,14 @@ public class AccountController {
 
     @GetMapping
     @Operation(summary = "List owned accounts, or all accounts for SUPPORT and ADMIN")
-    public List<AccountResponse> list(@AuthenticationPrincipal Jwt jwt) {
-        return accountService.list(AccountControllerSupport.actor(jwt)).stream()
-                .map(AccountResponse::from)
-                .toList();
+    public PageResponse<AccountResponse> list(
+            @AuthenticationPrincipal Jwt jwt,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return PageResponse.from(
+                accountService.list(AccountControllerSupport.actor(jwt),
+                        PageRequests.of(page, size, Sort.by("createdAt").ascending())),
+                AccountResponse::from);
     }
 
     @GetMapping("/{accountId}")

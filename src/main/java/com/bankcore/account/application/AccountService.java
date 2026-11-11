@@ -3,11 +3,12 @@ package com.bankcore.account.application;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 import com.bankcore.account.domain.Account;
 import com.bankcore.account.domain.AccountException;
@@ -15,6 +16,9 @@ import com.bankcore.account.domain.AccountType;
 import com.bankcore.account.domain.Currency;
 import com.bankcore.account.infrastructure.AccountNumberGenerator;
 import com.bankcore.account.infrastructure.AccountRepository;
+import com.bankcore.audit.application.AuditService;
+import com.bankcore.audit.domain.AuditAction;
+import com.bankcore.audit.domain.AuditResourceType;
 import com.bankcore.customer.domain.Customer;
 import com.bankcore.customer.domain.CustomerException;
 import com.bankcore.customer.infrastructure.CustomerRepository;
@@ -25,15 +29,18 @@ public class AccountService {
     private final AccountRepository accountRepository;
     private final CustomerRepository customerRepository;
     private final AccountNumberGenerator accountNumberGenerator;
+    private final AuditService auditService;
     private final Clock clock;
 
     public AccountService(AccountRepository accountRepository,
                           CustomerRepository customerRepository,
                           AccountNumberGenerator accountNumberGenerator,
+                          AuditService auditService,
                           Clock clock) {
         this.accountRepository = accountRepository;
         this.customerRepository = customerRepository;
         this.accountNumberGenerator = accountNumberGenerator;
+        this.auditService = auditService;
         this.clock = clock;
     }
 
@@ -51,17 +58,22 @@ public class AccountService {
                 accountType,
                 currency,
                 Instant.now(clock));
+        accountRepository.save(account);
+        auditService.record(userId, AuditAction.ACCOUNT_CREATED, AuditResourceType.ACCOUNT,
+                account.getId(), java.util.Map.of(
+                        "accountType", accountType.name(),
+                        "currency", currency.name()));
         return accountRepository.saveAndFlush(account);
     }
 
     @Transactional(readOnly = true)
-    public List<Account> list(AccountActor actor) {
+    public Page<Account> list(AccountActor actor, Pageable pageable) {
         if (actor.isStaff()) {
-            return accountRepository.findAllByOrderByCreatedAtAsc();
+            return accountRepository.findAll(pageable);
         }
         return customerRepository.findByUserId(actor.userId())
-                .map(customer -> accountRepository.findAllByCustomerIdOrderByCreatedAtAsc(customer.getId()))
-                .orElseGet(List::of);
+                .map(customer -> accountRepository.findAllByCustomerId(customer.getId(), pageable))
+                .orElseGet(() -> Page.empty(pageable));
     }
 
     @Transactional(readOnly = true)

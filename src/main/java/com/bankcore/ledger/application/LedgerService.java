@@ -1,12 +1,13 @@
 package com.bankcore.ledger.application;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 import com.bankcore.account.application.AccountActor;
 import com.bankcore.account.application.AccountService;
@@ -32,8 +33,9 @@ public class LedgerService {
     }
 
     @Transactional(readOnly = true)
-    public List<AccountTransaction> accountTransactions(UUID accountId, AccountActor actor) {
+    public Page<AccountTransaction> accountTransactions(
+            UUID accountId, AccountActor actor, Pageable pageable) {
         accountService.get(accountId, actor);
-        return ledgerEntryRepository.findAccountTransactions(accountId);
+        return ledgerEntryRepository.findAccountTransactions(accountId, pageable);
     }
 }

@@ -28,4 +28,8 @@ public final class TransferException extends ApiException {
     public static TransferException businessFailure(ApiException cause) {
         return new TransferException(cause.status(), cause.code(), cause.getMessage());
     }
+
+    public static TransferException replayedFailure(int status, String code, String message) {
+        return new TransferException(HttpStatus.valueOf(status), code, message);
+    }
 }

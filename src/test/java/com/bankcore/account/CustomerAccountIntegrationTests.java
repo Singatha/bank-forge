@@ -81,11 +81,13 @@ class CustomerAccountIntegrationTests {
 
         mockMvc.perform(get("/api/v1/accounts").header("Authorization", bearer(token)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(2))
-                .andExpect(jsonPath("$[0].accountNumber").value(org.hamcrest.Matchers.startsWith("BC")))
-                .andExpect(jsonPath("$[0].currency").value("ZAR"))
-                .andExpect(jsonPath("$[0].availableBalance").value(0.00))
-                .andExpect(jsonPath("$[0].status").value("ACTIVE"));
+                .andExpect(jsonPath("$.content.length()").value(2))
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.content[0].accountNumber")
+                        .value(org.hamcrest.Matchers.startsWith("BC")))
+                .andExpect(jsonPath("$.content[0].currency").value("ZAR"))
+                .andExpect(jsonPath("$.content[0].availableBalance").value(0.00))
+                .andExpect(jsonPath("$.content[0].status").value("ACTIVE"));
 
         mockMvc.perform(get("/api/v1/accounts/{id}", checkingId)
                         .header("Authorization", bearer(token)))
@@ -128,8 +130,8 @@ class CustomerAccountIntegrationTests {
 
         mockMvc.perform(get("/api/v1/accounts").header("Authorization", bearer(strangerToken)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$[0].accountType").value("SAVINGS"));
+                .andExpect(jsonPath("$.content.length()").value(1))
+                .andExpect(jsonPath("$.content[0].accountType").value("SAVINGS"));
     }
 
     @Test

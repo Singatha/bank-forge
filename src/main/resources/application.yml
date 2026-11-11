@@ -28,6 +28,10 @@ server:
     include-message: never
     include-stacktrace: never
 
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%-5level service=bankcore requestId=%X{requestId:-} correlationId=%X{correlationId:-} logger=%logger{36} message=%msg%n"
+
 management:
   endpoints:
     web:

@@ -91,14 +91,32 @@ class AuthIntegrationTests {
                 "select token_hash from refresh_tokens rt join users u on u.id = rt.user_id where u.email = ?",
                 String.class, "login@example.com");
         assertThat(storedHash).hasSize(64).isNotEqualTo(tokens.refreshToken());
+        assertThat(jdbcTemplate.queryForObject("""
+                select count(*) from audit_logs audit
+                join users user_account on user_account.id = audit.actor_user_id
+                where audit.action = 'LOGIN_SUCCESS' and user_account.email = ?
+                """, Integer.class, "login@example.com")).isEqualTo(1);
     }
 
     @Test
     void badCredentialsReturnTheSameUnauthorizedError() throws Exception {
         register("credentials@example.com");
+        int before = jdbcTemplate.queryForObject("""
+                select count(*) from audit_logs
+                where action = 'LOGIN_FAILED' and metadata ->> 'reason' = 'INVALID_CREDENTIALS'
+                """, Integer.class);
 
         assertInvalidCredentials("credentials@example.com", "this password is wrong");
         assertInvalidCredentials("missing@example.com", "this password is wrong");
+
+        int after = jdbcTemplate.queryForObject("""
+                select count(*) from audit_logs
+                where action = 'LOGIN_FAILED' and metadata ->> 'reason' = 'INVALID_CREDENTIALS'
+                """, Integer.class);
+        assertThat(after - before).isEqualTo(2);
+        assertThat(jdbcTemplate.queryForObject(
+                "select metadata::text from audit_logs where action = 'LOGIN_FAILED' order by occurred_at desc limit 1",
+                String.class)).doesNotContain("password").doesNotContain("this password is wrong");
     }
 
     @Test

@@ -5,7 +5,10 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,10 +24,15 @@ import com.bankcore.auth.infrastructure.OpaqueTokenService;
 import com.bankcore.auth.infrastructure.RefreshTokenRepository;
 import com.bankcore.auth.infrastructure.RoleRepository;
 import com.bankcore.auth.infrastructure.UserRepository;
+import com.bankcore.audit.application.AuditService;
+import com.bankcore.audit.domain.AuditAction;
+import com.bankcore.audit.domain.AuditResourceType;
 import com.bankcore.config.SecurityProperties;
 
 @Service
 public class AuthService {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(AuthService.class);
 
     private static final String DUMMY_PASSWORD_HASH =
             "$2a$10$C6UzMDM.H6dfI/f/IKcEe.1WiBm7.KX5b5p1jYQ3Yh6n2aH5lV5e.";
@@ -36,6 +44,7 @@ public class AuthService {
     private final OpaqueTokenService opaqueTokenService;
     private final JwtService jwtService;
     private final SecurityProperties securityProperties;
+    private final AuditService auditService;
     private final Clock clock;
 
     public AuthService(UserRepository userRepository,
@@ -45,6 +54,7 @@ public class AuthService {
                        OpaqueTokenService opaqueTokenService,
                        JwtService jwtService,
                        SecurityProperties securityProperties,
+                       AuditService auditService,
                        Clock clock) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
@@ -53,6 +63,7 @@ public class AuthService {
         this.opaqueTokenService = opaqueTokenService;
         this.jwtService = jwtService;
         this.securityProperties = securityProperties;
+        this.auditService = auditService;
         this.clock = clock;
     }
 
@@ -74,19 +85,31 @@ public class AuthService {
     @Transactional
     public TokenPair login(String email, String password) {
         String normalizedEmail = normalizeEmail(email);
-        validatePasswordBytes(password);
+        try {
+            validatePasswordBytes(password);
+        } catch (AuthException exception) {
+            recordLoginFailure(null, exception.code());
+            throw exception;
+        }
         User user = userRepository.findByEmail(normalizedEmail).orElse(null);
         if (user == null) {
             passwordEncoder.matches(password, DUMMY_PASSWORD_HASH);
+            recordLoginFailure(null, "INVALID_CREDENTIALS");
             throw AuthException.invalidCredentials();
         }
         if (!passwordEncoder.matches(password, user.getPasswordHash())) {
+            recordLoginFailure(user.getId(), "INVALID_CREDENTIALS");
             throw AuthException.invalidCredentials();
         }
         if (!user.isActive()) {
+            recordLoginFailure(user.getId(), "ACCOUNT_DISABLED");
             throw AuthException.accountDisabled();
         }
-        return issueTokenPair(user, UUID.randomUUID());
+        TokenPair tokenPair = issueTokenPair(user, UUID.randomUUID());
+        auditService.record(user.getId(), AuditAction.LOGIN_SUCCESS, AuditResourceType.AUTH_SESSION,
+                null, Map.of());
+        LOGGER.info("login_success userId={}", user.getId());
+        return tokenPair;
     }
 
     @Transactional(noRollbackFor = AuthException.class)
@@ -155,6 +178,12 @@ public class AuthService {
         if (password.getBytes(StandardCharsets.UTF_8).length > 72) {
             throw AuthException.invalidPasswordLength();
         }
+    }
+
+    private void recordLoginFailure(UUID userId, String reason) {
+        auditService.recordIndependent(userId, AuditAction.LOGIN_FAILED, AuditResourceType.AUTH_SESSION,
+                null, Map.of("reason", reason));
+        LOGGER.warn("login_failed userId={} reason={}", userId, reason);
     }
 }
 

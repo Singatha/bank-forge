@@ -20,15 +20,26 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.data.domain.Sort;
+
+import jakarta.servlet.http.HttpServletResponse;
 
 import com.bankcore.account.application.AccountActor;
 import com.bankcore.transfer.application.TransferService;
+import com.bankcore.transfer.application.TransferResult;
+import com.bankcore.shared.api.PageRequests;
+import com.bankcore.shared.api.PageResponse;
 
 @RestController
 @RequestMapping("/api/v1/transfers")
 @Tag(name = "Transfers")
 @SecurityRequirement(name = "bearerAuth")
 public class TransferController {
+
+    public static final String IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+    public static final String IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
 
     private final TransferService transferService;
 
@@ -41,22 +52,33 @@ public class TransferController {
     @PreAuthorize("hasRole('CUSTOMER')")
     @Operation(summary = "Transfer simulated funds from an owned account")
     public TransferResponse create(@AuthenticationPrincipal Jwt jwt,
+                                   @RequestHeader(name = IDEMPOTENCY_KEY_HEADER, required = false)
+                                   String idempotencyKey,
+                                   HttpServletResponse response,
                                    @Valid @RequestBody CreateTransferRequest request) {
-        return TransferResponse.from(transferService.create(
+        TransferResult result = transferService.create(
                 actor(jwt),
+                idempotencyKey,
                 request.sourceAccountId(),
                 request.destinationAccountId(),
                 request.amount(),
                 request.currency(),
-                request.description()));
+                request.description());
+        response.setHeader(IDEMPOTENCY_REPLAYED_HEADER, Boolean.toString(result.replayed()));
+        return TransferResponse.from(result.transfer());
     }
 
     @GetMapping
     @Operation(summary = "List transfers visible through owned accounts; staff can list all")
-    public List<TransferResponse> list(@AuthenticationPrincipal Jwt jwt) {
-        return transferService.list(actor(jwt)).stream()
-                .map(TransferResponse::from)
-                .toList();
+    public PageResponse<TransferResponse> list(
+            @AuthenticationPrincipal Jwt jwt,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return PageResponse.from(
+                transferService.list(actor(jwt),
+                        PageRequests.of(page, size,
+                                Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")))),
+                TransferResponse::from);
     }
 
     @GetMapping("/{transferId}")

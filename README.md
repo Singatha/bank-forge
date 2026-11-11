@@ -2,7 +2,7 @@
 
 BankCore is a portfolio-quality, simulated online banking backend for learning backend engineering. It does not connect to banks, move real money, collect real banking credentials, or claim regulatory compliance.
 
-Milestone 5 adds an append-only double-entry ledger, commit-time reconciliation rules, atomic transfer posting, and owner-aware account transaction history derived from immutable ledger entries.
+Milestone 6 adds persisted transfer idempotency, deterministic concurrency control, bounded pagination, correlation-aware structured logs, and append-only security and financial audit records.
 
 ## Architecture
 
@@ -17,12 +17,17 @@ flowchart LR
     API --> Account[Account module]
     API --> Transfer[Transfer module]
     API --> Ledger[Ledger module]
+    API --> Audit[Audit module]
     Transfer --> Ledger
+    Auth --> Audit
+    Account --> Audit
+    Transfer --> Audit
     Auth --> DB[(PostgreSQL)]
     Customer --> DB
     Account --> DB
     Transfer --> DB
     Ledger --> DB
+    Audit --> DB
     Flyway[Flyway migrations] --> DB
 ```
 
@@ -48,7 +53,7 @@ com.bankcore
 
 Features gain `api`, `application`, `domain`, and `infrastructure` packages as their functionality is implemented. Empty layers are not created speculatively.
 
-See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, and [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants.
+See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants, [ADR-006](docs/adr/ADR-006-transfer-idempotency-and-locking.md) for transfer reliability, and [ADR-007](docs/adr/ADR-007-request-context-and-audit.md) for request context and auditing.
 
 ## Technology
 
@@ -127,7 +132,7 @@ docker compose down
 | List visible transfers | `GET http://localhost:8080/api/v1/transfers` |
 | Get transfer | `GET http://localhost:8080/api/v1/transfers/{transferId}` |
 
-Every HTTP response includes an `X-Request-ID`. A valid UUID supplied by the client is propagated; otherwise the API generates one.
+Every HTTP response includes `X-Request-ID` and `X-Correlation-ID`. Valid UUIDs supplied by the client are propagated. Missing request IDs are generated; a missing correlation ID defaults to the request ID. Both identifiers appear in structured key-value logs and durable audit records.
 
 Register with an email address and a password of 12–72 characters:
 
@@ -175,7 +180,21 @@ The service creates the transfer, validates both accounts, debits the source, cr
 
 For a successful transfer, the same transaction also appends one source `DEBIT` and one destination `CREDIT` to the ledger. If either entry cannot be persisted or reconciled, the transfer and both balance changes roll back.
 
-Customers can see outgoing and incoming transfers connected to their accounts. Other customers receive `TRANSFER_NOT_FOUND`; `SUPPORT` and `ADMIN` have explicit read access. Account version columns detect conflicting updates, but the final locking/retry policy and concurrent-transfer tests belong to Milestone 6.
+Customers can see outgoing and incoming transfers connected to their accounts. Other customers receive `TRANSFER_NOT_FOUND`; `SUPPORT` and `ADMIN` have explicit read access. Account versions remain a stale-write guard, while Milestone 6 pessimistic locks provide the transfer concurrency policy described below.
+
+## Idempotency and concurrency
+
+`POST /api/v1/transfers` requires an `Idempotency-Key` containing 1–128 letters, digits, `.`, `_`, `:`, or `-`. The key is scoped to the authenticated user. A successful retry with the same key and request returns the original transfer with `Idempotency-Replayed: true`; a failed retry returns the original stable business error. Using the key for different input returns `409 IDEMPOTENCY_KEY_REUSED`.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/transfers \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Idempotency-Key: 774fc74c-4306-4415-86d8-f17b51192ee1' \
+  -H 'Content-Type: application/json' \
+  -d '{"sourceAccountId":"<uuid>","destinationAccountId":"<uuid>","amount":250.00,"currency":"ZAR","description":"Transfer"}'
+```
+
+PostgreSQL advisory transaction locks serialize concurrent requests using the same user/key pair. The source and destination account rows are then locked pessimistically in UUID order. Concurrent transfers sharing an account consequently validate against the latest committed balance, and deterministic ordering avoids lock-order deadlocks. Transfer state, balance changes, ledger postings, idempotency outcome, and audit record still share one transaction.
 
 ## Ledger and account transactions
 
@@ -194,6 +213,30 @@ flowchart LR
 Every posting must contain exactly two entries for distinct accounts, with one debit and one credit of the same positive amount and currency. PostgreSQL checks the final posting with deferred constraint triggers at transaction commit and rejects ledger rows for transfers that are not completed. Hibernate treats entries as immutable, and PostgreSQL rejects all ledger updates and deletes.
 
 `GET /api/v1/accounts/{accountId}/transactions` returns newest-first postings for an owned account; `SUPPORT` and `ADMIN` retain their explicit read access. Failed transfers do not appear because no funds moved. Development funding is deliberately excluded because it is opt-in test setup rather than a deposit transaction.
+
+## Pagination
+
+Account lists, transfer lists, and account transaction history accept zero-based `page` and `size` query parameters. The default size is 20 and the maximum is 100. Responses use a stable envelope:
+
+```json
+{
+  "content": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 0,
+  "totalPages": 0,
+  "first": true,
+  "last": true
+}
+```
+
+Accounts are ordered oldest-first; transfers and ledger transactions are ordered newest-first with UUID tie-breakers.
+
+## Audit and structured logging
+
+Audit rows are appended for `LOGIN_SUCCESS`, `LOGIN_FAILED`, `ACCOUNT_CREATED`, `TRANSFER_COMPLETED`, and `TRANSFER_FAILED`. They store controlled metadata and request/correlation identifiers but never passwords, authorization headers, access tokens, or refresh tokens. Hibernate exposes no mutation workflow and PostgreSQL rejects audit updates and deletes.
+
+Request completion, login outcomes, and transfer outcomes use consistent key-value logs with `service`, `requestId`, and `correlationId`. Logs are operational diagnostics; the PostgreSQL audit table is the durable business/security record.
 
 ## Error contract
 
@@ -218,7 +261,7 @@ Errors never expose stack traces or database messages. Validation errors add an 
 
 ## Database migrations
 
-Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, `V4` owns transfers, and `V5__create_ledger_schema.sql` owns immutable ledger entries and commit-time reconciliation. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
+Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, `V4` owns transfers, `V5` owns immutable ledger entries and reconciliation, and `V6__create_reliability_schema.sql` owns idempotency and append-only audit records. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
 
 ## Tests
 
@@ -228,7 +271,7 @@ Run all tests with:
 mvn verify
 ```
 
-Unit/web tests cover HTTP contracts, request IDs, transfer states, and balanced-ledger invariants. PostgreSQL Testcontainers tests verify schema version 5, authentication, customers/accounts, successful transfers, validation, insufficient funds, frozen accounts, ownership, precise balances, immutable balanced postings, ledger-derived history, database reconciliation, and full rollback. Container-backed tests are skipped only when Docker is unavailable.
+The 44 unit, web, and PostgreSQL Testcontainers tests cover schema version 6, authentication, customers/accounts, transfer and ledger invariants, rollback, sequential and simultaneous idempotency retries, payload conflicts, competing withdrawals, pagination bounds, correlation propagation, audit atomicity, and audit immutability. Container-backed tests are skipped only when Docker is unavailable.
 
 ## Milestone 1 acceptance criteria
 
@@ -284,3 +327,15 @@ Unit/web tests cover HTTP contracts, request IDs, transfer states, and balanced-
 - [x] Account transaction history is derived from ledger postings and respects account ownership.
 - [x] Database indexes support transfer reconciliation and newest-first account history.
 - [x] Unit and PostgreSQL integration tests prove ledger invariants, immutability, authorization, and rollback.
+
+## Milestone 6 acceptance criteria
+
+- [x] Transfer creation requires a persisted, user-scoped idempotency key and request fingerprint.
+- [x] Sequential and concurrent duplicate requests return one original transfer without moving funds twice.
+- [x] Reusing a key with different input returns a stable conflict error.
+- [x] Deterministically ordered pessimistic account locks prevent concurrent overdrafts.
+- [x] Account, transfer, and ledger-history collections return bounded page envelopes.
+- [x] Request and correlation IDs propagate through response headers, MDC logs, and audit rows.
+- [x] Login, account-creation, and transfer outcomes create safe structured audit records.
+- [x] PostgreSQL prevents audit records from being updated or deleted.
+- [x] PostgreSQL concurrency tests prove idempotency and balance integrity under simultaneous requests.
