@@ -1,12 +1,14 @@
 package com.bankcore.transfer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
@@ -57,6 +59,22 @@ class TransferIntegrationTests {
         assertBalance(destination, "250.25");
 
         String transferId = JsonPath.read(result.getResponse().getContentAsString(), "$.id");
+        var ledgerEntries = jdbcTemplate.queryForList("""
+                select account_id, entry_type, amount, currency
+                from ledger_entries
+                where transfer_id = ?::uuid
+                order by entry_type
+                """, transferId);
+        assertThat(ledgerEntries).hasSize(2);
+        assertThat(ledgerEntries).extracting(entry -> entry.get("entry_type"))
+                .containsExactly("CREDIT", "DEBIT");
+        assertThat(ledgerEntries).extracting(entry -> entry.get("account_id").toString())
+                .containsExactlyInAnyOrder(source.accountId(), destination.accountId());
+        assertThat(ledgerEntries).allSatisfy(entry -> {
+            assertThat((BigDecimal) entry.get("amount")).isEqualByComparingTo("250.25");
+            assertThat(entry.get("currency")).isEqualTo("ZAR");
+        });
+
         mockMvc.perform(get("/api/v1/transfers/{id}", transferId)
                         .header("Authorization", bearer(destination.token())))
                 .andExpect(status().isOk())
@@ -82,6 +100,11 @@ class TransferIntegrationTests {
                 """, source.accountId());
         assertThat(failure.get("status")).isEqualTo("FAILED");
         assertThat(failure.get("failure_reason")).isEqualTo("INSUFFICIENT_FUNDS");
+        assertThat(jdbcTemplate.queryForObject("""
+                select count(*) from ledger_entries entry
+                join transfers transfer on transfer.id = entry.transfer_id
+                where transfer.source_account_id = ?::uuid
+                """, Integer.class, source.accountId())).isZero();
     }
 
     @Test
@@ -167,6 +190,78 @@ class TransferIntegrationTests {
     }
 
     @Test
+    void accountTransactionHistoryComesFromImmutableLedgerEntries() throws Exception {
+        CustomerAccount source = customerWithAccount("ledger-history-source@example.com");
+        CustomerAccount destination = customerWithAccount("ledger-history-destination@example.com");
+        CustomerAccount stranger = customerWithAccount("ledger-history-stranger@example.com");
+        fund(source, "100.00");
+
+        MvcResult result = transfer(source.token(), source.accountId(), destination.accountId(), "35.75")
+                .andExpect(status().isCreated())
+                .andReturn();
+        String transferId = JsonPath.read(result.getResponse().getContentAsString(), "$.id");
+
+        mockMvc.perform(get("/api/v1/accounts/{id}/transactions", source.accountId())
+                        .header("Authorization", bearer(source.token())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].transferId").value(transferId))
+                .andExpect(jsonPath("$[0].entryType").value("DEBIT"))
+                .andExpect(jsonPath("$[0].amount").value(35.75))
+                .andExpect(jsonPath("$[0].transferReference").value(
+                        org.hamcrest.Matchers.startsWith("TR")));
+
+        mockMvc.perform(get("/api/v1/accounts/{id}/transactions", destination.accountId())
+                        .header("Authorization", bearer(destination.token())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].entryType").value("CREDIT"));
+
+        mockMvc.perform(get("/api/v1/accounts/{id}/transactions", source.accountId())
+                        .header("Authorization", bearer(stranger.token())))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ACCOUNT_NOT_FOUND"));
+
+        assertThatThrownBy(() -> jdbcTemplate.update(
+                "update ledger_entries set amount = 1.00 where transfer_id = ?::uuid", transferId))
+                .hasMessageContaining("ledger entries are append-only");
+        assertThatThrownBy(() -> jdbcTemplate.update(
+                "delete from ledger_entries where transfer_id = ?::uuid", transferId))
+                .hasMessageContaining("ledger entries are append-only");
+        assertThat(jdbcTemplate.queryForObject(
+                "select amount from ledger_entries where transfer_id = ?::uuid and entry_type = 'DEBIT'",
+                BigDecimal.class, transferId)).isEqualByComparingTo("35.75");
+        assertThat(jdbcTemplate.queryForObject(
+                "select count(*) from ledger_entries where transfer_id = ?::uuid",
+                Integer.class, transferId)).isEqualTo(2);
+    }
+
+    @Test
+    void databaseRejectsCompletedTransferWithoutBalancedLedgerEntries() throws Exception {
+        CustomerAccount source = customerWithAccount("missing-ledger-source@example.com");
+        CustomerAccount destination = customerWithAccount("missing-ledger-destination@example.com");
+        UUID userId = jdbcTemplate.queryForObject("""
+                select customer.user_id
+                from customers customer
+                join accounts account on account.customer_id = customer.id
+                where account.id = ?::uuid
+                """, UUID.class, source.accountId());
+        UUID transferId = UUID.randomUUID();
+
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                insert into transfers (
+                    id, reference, source_account_id, destination_account_id, initiated_by_user_id,
+                    amount, currency, status, description, created_at, completed_at, failure_reason)
+                values (?::uuid, ?, ?::uuid, ?::uuid, ?::uuid,
+                        10.00, 'ZAR', 'COMPLETED', 'Invalid direct insert', now(), now(), null)
+                """, transferId, "TR" + transferId.toString().replace("-", "").substring(0, 18).toUpperCase(),
+                source.accountId(), destination.accountId(), userId))
+                .hasMessageContaining("ledger is not balanced");
+
+        assertThat(jdbcTemplate.queryForObject(
+                "select count(*) from transfers where id = ?::uuid", Integer.class, transferId)).isZero();
+    }
+
+    @Test
     void databaseFailureRollsBackDebitCreditAndTransferRecord() throws Exception {
         CustomerAccount source = customerWithAccount("rollback-source@example.com");
         CustomerAccount destination = customerWithAccount("rollback-destination@example.com");
@@ -181,6 +276,9 @@ class TransferIntegrationTests {
         assertBalance(destination, "99999999999999999.99");
         assertThat(jdbcTemplate.queryForObject(
                 "select count(*) from transfers where source_account_id = ?::uuid",
+                Integer.class, source.accountId())).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "select count(*) from ledger_entries where account_id = ?::uuid",
                 Integer.class, source.accountId())).isZero();
     }
 

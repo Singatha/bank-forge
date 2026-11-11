@@ -2,7 +2,7 @@
 
 BankCore is a portfolio-quality, simulated online banking backend for learning backend engineering. It does not connect to banks, move real money, collect real banking credentials, or claim regulatory compliance.
 
-Milestone 4 adds atomic simulated transfers between ZAR accounts, explicit transfer states, insufficient-funds handling, owner-aware transfer history, and rollback guarantees. Ledger entries remain intentionally deferred to Milestone 5.
+Milestone 5 adds an append-only double-entry ledger, commit-time reconciliation rules, atomic transfer posting, and owner-aware account transaction history derived from immutable ledger entries.
 
 ## Architecture
 
@@ -16,10 +16,13 @@ flowchart LR
     API --> Customer[Customer module]
     API --> Account[Account module]
     API --> Transfer[Transfer module]
+    API --> Ledger[Ledger module]
+    Transfer --> Ledger
     Auth --> DB[(PostgreSQL)]
     Customer --> DB
     Account --> DB
     Transfer --> DB
+    Ledger --> DB
     Flyway[Flyway migrations] --> DB
 ```
 
@@ -45,7 +48,7 @@ com.bankcore
 
 Features gain `api`, `application`, `domain`, and `infrastructure` packages as their functionality is implemented. Empty layers are not created speculatively.
 
-See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, and [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries.
+See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, and [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants.
 
 ## Technology
 
@@ -118,6 +121,7 @@ docker compose down
 | List accessible accounts | `GET http://localhost:8080/api/v1/accounts` |
 | Get account | `GET http://localhost:8080/api/v1/accounts/{accountId}` |
 | Get balance | `GET http://localhost:8080/api/v1/accounts/{accountId}/balance` |
+| Account transaction history | `GET http://localhost:8080/api/v1/accounts/{accountId}/transactions` |
 | Simulated funding (opt-in) | `POST http://localhost:8080/api/v1/development/accounts/{accountId}/fund` |
 | Create transfer | `POST http://localhost:8080/api/v1/transfers` |
 | List visible transfers | `GET http://localhost:8080/api/v1/transfers` |
@@ -169,7 +173,27 @@ stateDiagram-v2
 
 The service creates the transfer, validates both accounts, debits the source, credits the destination, and completes the transfer inside one database transaction. An infrastructure failure rolls back the transfer and both balance changes. Expected business failures are recorded as `FAILED` transfers while balances remain unchanged.
 
+For a successful transfer, the same transaction also appends one source `DEBIT` and one destination `CREDIT` to the ledger. If either entry cannot be persisted or reconciled, the transfer and both balance changes roll back.
+
 Customers can see outgoing and incoming transfers connected to their accounts. Other customers receive `TRANSFER_NOT_FOUND`; `SUPPORT` and `ADMIN` have explicit read access. Account version columns detect conflicting updates, but the final locking/retry policy and concurrent-transfer tests belong to Milestone 6.
+
+## Ledger and account transactions
+
+The ledger is the immutable financial-history record for completed transfers. Stored account balances remain the fast current-state projection, while account transaction history is derived from ledger postings joined to transfer descriptions and references.
+
+```mermaid
+flowchart LR
+    Transfer[Completed transfer] --> Debit[Source DEBIT]
+    Transfer --> Credit[Destination CREDIT]
+    Debit --> Rule{Same amount and currency?}
+    Credit --> Rule
+    Rule -->|Yes| Commit[Commit transfer, balances, and ledger]
+    Rule -->|No| Rollback[Roll back everything]
+```
+
+Every posting must contain exactly two entries for distinct accounts, with one debit and one credit of the same positive amount and currency. PostgreSQL checks the final posting with deferred constraint triggers at transaction commit and rejects ledger rows for transfers that are not completed. Hibernate treats entries as immutable, and PostgreSQL rejects all ledger updates and deletes.
+
+`GET /api/v1/accounts/{accountId}/transactions` returns newest-first postings for an owned account; `SUPPORT` and `ADMIN` retain their explicit read access. Failed transfers do not appear because no funds moved. Development funding is deliberately excluded because it is opt-in test setup rather than a deposit transaction.
 
 ## Error contract
 
@@ -194,7 +218,7 @@ Errors never expose stack traces or database messages. Validation errors add an 
 
 ## Database migrations
 
-Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, and `V4__create_transfer_schema.sql` owns transfers and their database invariants. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
+Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, `V4` owns transfers, and `V5__create_ledger_schema.sql` owns immutable ledger entries and commit-time reconciliation. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
 
 ## Tests
 
@@ -204,7 +228,7 @@ Run all tests with:
 mvn verify
 ```
 
-Unit/web tests cover HTTP contracts, request IDs, and transfer-state invariants. PostgreSQL Testcontainers tests verify schema version 4, authentication, customers/accounts, successful transfers, validation, insufficient funds, frozen accounts, ownership, history visibility, precise balances, and full database rollback. Container-backed tests are skipped only when Docker is unavailable.
+Unit/web tests cover HTTP contracts, request IDs, transfer states, and balanced-ledger invariants. PostgreSQL Testcontainers tests verify schema version 5, authentication, customers/accounts, successful transfers, validation, insufficient funds, frozen accounts, ownership, precise balances, immutable balanced postings, ledger-derived history, database reconciliation, and full rollback. Container-backed tests are skipped only when Docker is unavailable.
 
 ## Milestone 1 acceptance criteria
 
@@ -249,3 +273,14 @@ Unit/web tests cover HTTP contracts, request IDs, and transfer-state invariants.
 - [x] Outgoing and incoming transfer history respects account ownership.
 - [x] Database constraints enforce positive amounts, distinct accounts, states, and failure/completion fields.
 - [x] Unit and PostgreSQL integration tests prove success, failure, and rollback behavior.
+
+## Milestone 5 acceptance criteria
+
+- [x] Every completed transfer atomically appends one source debit and one destination credit.
+- [x] Debit and credit amounts, currencies, transfer IDs, and distinct accounts must balance.
+- [x] Hibernate models ledger entries as immutable and PostgreSQL rejects updates and deletes.
+- [x] Deferred database reconciliation prevents completed transfers with missing or invalid postings.
+- [x] Failed transfers and rolled-back transfers leave no ledger entries.
+- [x] Account transaction history is derived from ledger postings and respects account ownership.
+- [x] Database indexes support transfer reconciliation and newest-first account history.
+- [x] Unit and PostgreSQL integration tests prove ledger invariants, immutability, authorization, and rollback.

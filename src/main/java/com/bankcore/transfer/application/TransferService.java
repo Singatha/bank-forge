@@ -15,6 +15,7 @@ import com.bankcore.account.domain.AccountException;
 import com.bankcore.account.domain.Currency;
 import com.bankcore.account.infrastructure.AccountRepository;
 import com.bankcore.customer.infrastructure.CustomerRepository;
+import com.bankcore.ledger.application.LedgerService;
 import com.bankcore.transfer.domain.Transfer;
 import com.bankcore.transfer.domain.TransferException;
 import com.bankcore.transfer.infrastructure.TransferReferenceGenerator;
@@ -27,17 +28,20 @@ public class TransferService {
     private final AccountRepository accountRepository;
     private final CustomerRepository customerRepository;
     private final TransferReferenceGenerator referenceGenerator;
+    private final LedgerService ledgerService;
     private final Clock clock;
 
     public TransferService(TransferRepository transferRepository,
                            AccountRepository accountRepository,
                            CustomerRepository customerRepository,
                            TransferReferenceGenerator referenceGenerator,
+                           LedgerService ledgerService,
                            Clock clock) {
         this.transferRepository = transferRepository;
         this.accountRepository = accountRepository;
         this.customerRepository = customerRepository;
         this.referenceGenerator = referenceGenerator;
+        this.ledgerService = ledgerService;
         this.clock = clock;
     }
 
@@ -80,6 +84,7 @@ public class TransferService {
         source.applyTransferDebit(amount, now);
         destination.applyTransferCredit(amount, now);
         transfer.complete(now);
+        ledgerService.postCompletedTransfer(transfer, now);
         return transferRepository.saveAndFlush(transfer);
     }
 
