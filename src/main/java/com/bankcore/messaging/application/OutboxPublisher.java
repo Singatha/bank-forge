@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import com.bankcore.config.MessagingProperties;
 import com.bankcore.messaging.domain.OutboxEvent;
+import com.bankcore.observability.application.BankCoreMetrics;
 import tools.jackson.databind.ObjectMapper;
 
 @Component
@@ -23,15 +24,18 @@ public class OutboxPublisher {
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
     private final MessagingProperties properties;
+    private final BankCoreMetrics metrics;
 
     public OutboxPublisher(OutboxClaimService claimService,
                            KafkaTemplate<String, String> kafkaTemplate,
                            ObjectMapper objectMapper,
-                           MessagingProperties properties) {
+                           MessagingProperties properties,
+                           BankCoreMetrics metrics) {
         this.claimService = claimService;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
         this.properties = properties;
+        this.metrics = metrics;
     }
 
     @Scheduled(
@@ -58,10 +62,12 @@ public class OutboxPublisher {
                             body)
                     .get(properties.publishTimeout().toMillis(), TimeUnit.MILLISECONDS);
             claimService.markPublished(event.getId());
+            metrics.outboxPublication("published");
             LOGGER.info("outbox_event_published eventId={} aggregateId={}",
                     event.getId(), event.getAggregateId());
         } catch (Exception exception) {
             claimService.markFailed(event.getId(), exception);
+            metrics.outboxPublication("failed");
             LOGGER.warn("outbox_event_publish_failed eventId={} errorType={}",
                     event.getId(), exception.getClass().getSimpleName());
         }

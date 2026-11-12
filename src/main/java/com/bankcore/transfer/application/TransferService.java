@@ -26,6 +26,7 @@ import com.bankcore.customer.infrastructure.CustomerRepository;
 import com.bankcore.ledger.application.LedgerService;
 import com.bankcore.messaging.application.OutboxService;
 import com.bankcore.messaging.domain.EventType;
+import com.bankcore.observability.application.BankCoreMetrics;
 import com.bankcore.transfer.domain.Transfer;
 import com.bankcore.transfer.domain.TransferException;
 import com.bankcore.transfer.domain.IdempotencyException;
@@ -48,6 +49,7 @@ public class TransferService {
     private final TransferRequestFingerprint requestFingerprint;
     private final AuditService auditService;
     private final OutboxService outboxService;
+    private final BankCoreMetrics metrics;
     private final Clock clock;
 
     public TransferService(TransferRepository transferRepository,
@@ -59,6 +61,7 @@ public class TransferService {
                            TransferRequestFingerprint requestFingerprint,
                            AuditService auditService,
                            OutboxService outboxService,
+                           BankCoreMetrics metrics,
                            Clock clock) {
         this.transferRepository = transferRepository;
         this.accountRepository = accountRepository;
@@ -69,6 +72,7 @@ public class TransferService {
         this.requestFingerprint = requestFingerprint;
         this.auditService = auditService;
         this.outboxService = outboxService;
+        this.metrics = metrics;
         this.clock = clock;
     }
 
@@ -76,6 +80,7 @@ public class TransferService {
     public TransferResult create(AccountActor actor, String idempotencyKey,
                                  UUID sourceAccountId, UUID destinationAccountId,
                                  BigDecimal amount, Currency currency, String description) {
+        long metricStartedAt = metrics.startTimer();
         idempotencyService.validateKey(idempotencyKey);
         if (sourceAccountId.equals(destinationAccountId)) {
             throw TransferException.sameAccount();
@@ -125,6 +130,7 @@ public class TransferService {
                             "reason", exception.code()));
             outboxService.appendTransferEvent(transfer, EventType.TRANSFER_FAILED, now);
             transferRepository.saveAndFlush(transfer);
+            metrics.transferFailed(metricStartedAt);
             LOGGER.warn("transfer_failed transferId={} sourceAccountId={} destinationAccountId={} reason={}",
                     transfer.getId(), sourceAccountId, destinationAccountId, exception.code());
             throw TransferException.businessFailure(exception);
@@ -139,6 +145,7 @@ public class TransferService {
                 transfer.getId(), Map.of("reference", transfer.getReference()));
         outboxService.appendTransferEvent(transfer, EventType.TRANSFER_COMPLETED, now);
         Transfer completed = transferRepository.saveAndFlush(transfer);
+        metrics.transferCompleted(metricStartedAt);
         LOGGER.info("transfer_completed transferId={} sourceAccountId={} destinationAccountId={}",
                 transfer.getId(), sourceAccountId, destinationAccountId);
         return new TransferResult(completed, false);

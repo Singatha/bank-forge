@@ -24,6 +24,7 @@ import com.bankcore.notification.domain.Notification;
 import com.bankcore.notification.domain.NotificationType;
 import com.bankcore.notification.infrastructure.NotificationRepository;
 import com.bankcore.notification.infrastructure.ProcessedEventRepository;
+import com.bankcore.observability.application.BankCoreMetrics;
 import tools.jackson.databind.ObjectMapper;
 
 @Component
@@ -38,19 +39,22 @@ public class NotificationEventConsumer {
     private final ProcessedEventRepository processedEventRepository;
     private final MessagingProperties properties;
     private final Clock clock;
+    private final BankCoreMetrics metrics;
 
     public NotificationEventConsumer(ObjectMapper objectMapper,
                                      AccountRepository accountRepository,
                                      NotificationRepository notificationRepository,
                                      ProcessedEventRepository processedEventRepository,
                                      MessagingProperties properties,
-                                     Clock clock) {
+                                     Clock clock,
+                                     BankCoreMetrics metrics) {
         this.objectMapper = objectMapper;
         this.accountRepository = accountRepository;
         this.notificationRepository = notificationRepository;
         this.processedEventRepository = processedEventRepository;
         this.properties = properties;
         this.clock = clock;
+        this.metrics = metrics;
     }
 
     @KafkaListener(
@@ -58,10 +62,15 @@ public class NotificationEventConsumer {
             groupId = "${bankcore.messaging.notification-consumer-group}")
     @Transactional
     public void consume(String body) {
-        EventEnvelope event = parse(body);
-        try (MDC.MDCCloseable ignored = MDC.putCloseable(
-                "correlationId", event.correlationId().toString())) {
-            process(event);
+        try {
+            EventEnvelope event = parse(body);
+            try (MDC.MDCCloseable ignored = MDC.putCloseable(
+                    "correlationId", event.correlationId().toString())) {
+                process(event);
+            }
+        } catch (RuntimeException exception) {
+            metrics.kafkaConsumer("failed");
+            throw exception;
         }
     }
 
@@ -74,12 +83,14 @@ public class NotificationEventConsumer {
         int inserted = processedEventRepository.insertIfAbsent(
                 UUID.randomUUID(), consumerName, event.eventId(), now);
         if (inserted == 0) {
+            metrics.kafkaConsumer("duplicate");
             LOGGER.info("notification_event_duplicate eventId={}", event.eventId());
             return;
         }
 
         List<Notification> notifications = createNotifications(event, now);
         notificationRepository.saveAll(notifications);
+        metrics.kafkaConsumer("processed");
         LOGGER.info("notification_event_processed eventId={} notificationCount={}",
                 event.eventId(), notifications.size());
     }

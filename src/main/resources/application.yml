@@ -34,6 +34,14 @@ spring:
       enable-auto-commit: false
     listener:
       ack-mode: record
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: ${REDIS_TIMEOUT:2s}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:2s}
+      repositories:
+        enabled: false
 
 server:
   shutdown: graceful
@@ -49,12 +57,28 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       probes:
         enabled: true
       show-details: never
+      validate-group-membership: false
+      group:
+        liveness:
+          include: livenessState,ping
+        readiness:
+          include: readinessState,db,redis,kafka
+  health:
+    redis:
+      enabled: ${bankcore.rate-limiting.enabled:false}
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
 
 springdoc:
   api-docs:
@@ -71,6 +95,15 @@ bankcore:
     refresh-token-ttl: ${REFRESH_TOKEN_TTL:30d}
   features:
     development-funding-enabled: ${DEVELOPMENT_FUNDING_ENABLED:false}
+  rate-limiting:
+    enabled: ${RATE_LIMITING_ENABLED:false}
+    key-prefix: ${RATE_LIMIT_KEY_PREFIX:bankcore:rate-limit}
+    authentication:
+      limit: ${AUTH_RATE_LIMIT:10}
+      window: ${AUTH_RATE_WINDOW:1m}
+    transfers:
+      limit: ${TRANSFER_RATE_LIMIT:20}
+      window: ${TRANSFER_RATE_WINDOW:1m}
   messaging:
     enabled: ${KAFKA_ENABLED:false}
     transfer-topic: ${TRANSFER_TOPIC:bankcore.transfer.events.v1}

@@ -2,7 +2,7 @@
 
 BankCore is a portfolio-quality, simulated online banking backend for learning backend engineering. It does not connect to banks, move real money, collect real banking credentials, or claim regulatory compliance.
 
-Milestone 7 adds Kafka transfer events, a PostgreSQL transactional outbox, retryable at-least-once publication, idempotent notification consumption, and dead-letter handling.
+Milestone 8 adds Redis-backed API rate limiting, Micrometer application metrics, Prometheus scraping, a provisioned Grafana dashboard, and dependency-aware readiness checks.
 
 ## Architecture
 
@@ -11,6 +11,8 @@ BankCore starts as a feature-oriented modular monolith. PostgreSQL is the source
 ```mermaid
 flowchart LR
     Client[API Client] --> API[Spring Boot API]
+    API --> RateLimit[Rate limiter]
+    RateLimit --> Redis[(Redis)]
     API --> Shared[Shared HTTP foundation]
     API --> Auth[Auth module]
     API --> Customer[Customer module]
@@ -35,6 +37,8 @@ flowchart LR
     Outbox --> DB
     Notification --> DB
     Flyway[Flyway migrations] --> DB
+    Prometheus[Prometheus] -->|scrape| API
+    Grafana[Grafana] --> Prometheus
 ```
 
 The initial package boundaries are:
@@ -51,6 +55,8 @@ com.bankcore
 ├── notification
 ├── statement
 ├── audit
+├── ratelimit
+├── observability
 ├── shared
 │   ├── api
 │   ├── error
@@ -60,21 +66,22 @@ com.bankcore
 
 Features gain `api`, `application`, `domain`, and `infrastructure` packages as their functionality is implemented. Empty layers are not created speculatively.
 
-See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants, [ADR-006](docs/adr/ADR-006-transfer-idempotency-and-locking.md) for transfer reliability, [ADR-007](docs/adr/ADR-007-request-context-and-audit.md) for request context and auditing, and [ADR-008](docs/adr/ADR-008-transactional-outbox-and-kafka-delivery.md) for Kafka delivery semantics.
+See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants, [ADR-006](docs/adr/ADR-006-transfer-idempotency-and-locking.md) for transfer reliability, [ADR-007](docs/adr/ADR-007-request-context-and-audit.md) for request context and auditing, [ADR-008](docs/adr/ADR-008-transactional-outbox-and-kafka-delivery.md) for Kafka delivery semantics, and [ADR-009](docs/adr/ADR-009-redis-rate-limiting-and-observability.md) for rate limiting and observability.
 
 ## Technology
 
 - Java 21
 - Spring Boot 4.1
-- Spring Web MVC, Validation, Data JPA, Security, OAuth2 Resource Server, Kafka, and Actuator
+- Spring Web MVC, Validation, Data JPA, Data Redis, Security, OAuth2 Resource Server, Kafka, and Actuator
 - PostgreSQL 17
 - Apache Kafka 3.9
+- Redis 8.2
 - Flyway
+- Micrometer with Prometheus
+- Grafana
 - springdoc OpenAPI
 - JUnit 5 and Testcontainers
 - Maven
-
-Redis, Prometheus, and Grafana are deliberately absent until a milestone has a concrete use for them.
 
 ## Prerequisites
 
@@ -84,10 +91,10 @@ Redis, Prometheus, and Grafana are deliberately absent until a milestone has a c
 
 ## Run locally
 
-Copy `.env.example` to `.env` if you want to override the local defaults, then start PostgreSQL and Kafka:
+Copy `.env.example` to `.env` if you want to override the local defaults, then start PostgreSQL, Kafka, Redis, Prometheus, and Grafana:
 
 ```bash
-docker compose up -d postgres kafka
+docker compose up -d
 ```
 
 Start the application:
@@ -108,6 +115,14 @@ Kafka publishing and consumption are disabled by default, while transfer transac
 KAFKA_ENABLED=true mvn spring-boot:run
 ```
 
+Rate limiting is also disabled by default. Enable it when Redis is running:
+
+```bash
+RATE_LIMITING_ENABLED=true mvn spring-boot:run
+```
+
+Flags can be combined. With the application running on port 8080, Prometheus scrapes it through `host.docker.internal`; Grafana is provisioned with the Prometheus data source and the BankCore Overview dashboard.
+
 The default database connection is `jdbc:postgresql://localhost:5432/bankcore`, with local-only username `bankcore` and password `bankcore-local`. All values can be overridden with environment variables shown in `.env.example`.
 
 The checked-in JWT secret is strictly a local-development default. Set a random secret of at least 32 UTF-8 bytes through `JWT_SECRET` in every shared or deployed environment. Access and refresh lifetimes default to 15 minutes and 30 days and can be overridden with `ACCESS_TOKEN_TTL` and `REFRESH_TOKEN_TTL`.
@@ -126,6 +141,9 @@ docker compose down
 | Actuator health | `GET http://localhost:8080/actuator/health` |
 | Liveness | `GET http://localhost:8080/actuator/health/liveness` |
 | Readiness | `GET http://localhost:8080/actuator/health/readiness` |
+| Prometheus metrics | `GET http://localhost:8080/actuator/prometheus` |
+| Prometheus UI | `http://localhost:9090` |
+| Grafana UI | `http://localhost:3000` |
 | OpenAPI JSON | `GET http://localhost:8080/api-docs` |
 | Swagger UI | `http://localhost:8080/swagger-ui.html` |
 | Register | `POST http://localhost:8080/api/v1/auth/register` |
@@ -272,6 +290,30 @@ Events use the `bankcore.transfer.events.v1` topic and contain `eventId`, `event
 
 Publication is at least once. The publisher claims rows in separate short transactions, retries failures up to five times with backoff, and recovers stale claims after a timeout. A crash after Kafka accepts a record but before the row is marked published can produce a duplicate. The consumer prevents duplicate effects with a unique `(consumer_name, event_id)` marker inserted atomically with its notifications. Consumer failures receive two listener retries before the original key and body are routed to `bankcore.transfer.events.v1.dlt`.
 
+## Rate limiting
+
+When `RATE_LIMITING_ENABLED=true`, Redis applies atomic fixed-window counters to abuse-sensitive write endpoints. Registration, login, and refresh share the authentication policy keyed by the direct remote address; transfer creation uses a separate policy keyed by the authenticated user ID. Defaults are 10 authentication attempts and 20 transfer attempts per minute and can be changed through `.env.example`.
+
+Responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`. Rejected requests return `429 RATE_LIMIT_EXCEEDED` with `Retry-After` using the shared error contract. If Redis is unavailable while limiting is enabled, BankCore fails closed with `503 RATE_LIMIT_UNAVAILABLE` instead of silently bypassing protection.
+
+Only hashed rate-limit identifiers and short-lived counters are stored in Redis. PostgreSQL remains authoritative for identities, balances, transfers, ledger entries, audit records, and delivery state. BankCore deliberately uses the socket remote address rather than trusting forwarded headers; a deployment behind a trusted reverse proxy must establish and test an explicit proxy-header policy before using client-IP limiting.
+
+## Observability
+
+Micrometer exports standard JVM, HTTP, database-pool, and process metrics plus bounded BankCore metrics:
+
+| Metric | Purpose |
+| --- | --- |
+| `bankcore_transfers_total` | Completed and failed transfer outcomes |
+| `bankcore_transfer_duration_seconds` | Histogram of terminal transfer execution time |
+| `bankcore_outbox_events_total` | Published and failed outbox attempts |
+| `bankcore_kafka_consumer_events_total` | Processed, duplicate, and failed consumer outcomes |
+| `bankcore_rate_limit_decisions_total` | Allowed, rejected, and unavailable decisions by policy |
+
+Prometheus retains local metrics for seven days. Grafana automatically provisions its data source and a BankCore Overview dashboard covering HTTP traffic, transfer throughput and latency, messaging outcomes, rate limiting, and scrape health. The local Grafana credentials default to `admin` / `bankcore-local` and must be replaced outside local development.
+
+Liveness reports only the application process state. Readiness includes PostgreSQL and, when their features are enabled, Redis and Kafka. This keeps optional dependencies from making a disabled feature unready while still removing an enabled but unhealthy dependency from service. The Prometheus endpoint is intentionally unauthenticated for the local Compose scraper and must be network-restricted in a deployed environment.
+
 ## Error contract
 
 Errors never expose stack traces or database messages. Validation errors add an `errors` array to this base contract:
@@ -305,7 +347,7 @@ Run all tests with:
 mvn verify
 ```
 
-The 52 unit, web, PostgreSQL, and Kafka Testcontainers tests cover schema version 7, authentication, customers/accounts, transfer and ledger invariants, rollback, idempotency, competing withdrawals, pagination, correlation propagation, audit atomicity, atomic outbox creation, publisher state transitions, completed and failed Kafka notification delivery, duplicate events, consumer retries, and dead-letter routing. Container-backed tests are skipped only when Docker is unavailable.
+The 57 unit, web, PostgreSQL, Kafka, and Redis Testcontainers tests cover schema version 7, authentication, customers/accounts, transfer and ledger invariants, rollback, idempotency, competing withdrawals, pagination, correlation propagation, audit atomicity, atomic outbox creation, publisher state transitions, completed and failed Kafka notification delivery, duplicate events, consumer retries, dead-letter routing, rate-limit isolation, fail-closed behavior and rejection, Prometheus export, and dependency-aware readiness. Container-backed tests are skipped only when Docker is unavailable.
 
 ## Milestone 1 acceptance criteria
 
@@ -384,3 +426,14 @@ The 52 unit, web, PostgreSQL, and Kafka Testcontainers tests cover schema versio
 - [x] A PostgreSQL consumer/event marker prevents duplicate Kafka delivery from creating duplicate effects.
 - [x] Failed consumer records receive bounded retries before routing to a dead-letter topic.
 - [x] PostgreSQL and Kafka Testcontainers tests prove atomicity, delivery, deduplication, and DLT behavior.
+
+## Milestone 8 acceptance criteria
+
+- [x] Redis is used only for distributed rate-limit counters and never as financial state.
+- [x] Authentication writes are limited by remote address and transfers by authenticated user.
+- [x] Limit responses expose quota headers and use shared safe `429` and `503` errors.
+- [x] Redis counters are updated atomically and an enabled limiter fails closed when Redis is unavailable.
+- [x] Micrometer exports bounded transfer, outbox, Kafka-consumer, and rate-limit metrics.
+- [x] Prometheus scraping and a provisioned Grafana overview dashboard are included in Docker Compose.
+- [x] Liveness is process-only while readiness reflects enabled PostgreSQL, Redis, and Kafka dependencies.
+- [x] Redis-backed integration tests prove throttling, metric export, and readiness behavior.
