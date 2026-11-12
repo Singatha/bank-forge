@@ -74,6 +74,17 @@ class TransferIntegrationTests {
             assertThat((BigDecimal) entry.get("amount")).isEqualByComparingTo("250.25");
             assertThat(entry.get("currency")).isEqualTo("ZAR");
         });
+        var event = jdbcTemplate.queryForMap("""
+                select event_type, aggregate_type, status, payload
+                from outbox_events
+                where aggregate_id = ?::uuid
+                """, transferId);
+        assertThat(event.get("event_type")).isEqualTo("TRANSFER_COMPLETED");
+        assertThat(event.get("aggregate_type")).isEqualTo("TRANSFER");
+        assertThat(event.get("status")).isEqualTo("PENDING");
+        assertThat(event.get("payload").toString())
+                .contains(source.accountId(), destination.accountId())
+                .doesNotContain("password", "token");
 
         mockMvc.perform(get("/api/v1/transfers/{id}", transferId)
                         .header("Authorization", bearer(destination.token())))
@@ -100,6 +111,12 @@ class TransferIntegrationTests {
                 """, source.accountId());
         assertThat(failure.get("status")).isEqualTo("FAILED");
         assertThat(failure.get("failure_reason")).isEqualTo("INSUFFICIENT_FUNDS");
+        UUID failedTransferId = jdbcTemplate.queryForObject("""
+                select id from transfers where source_account_id = ?::uuid
+                """, UUID.class, source.accountId());
+        assertThat(jdbcTemplate.queryForObject("""
+                select event_type from outbox_events where aggregate_id = ?
+                """, String.class, failedTransferId)).isEqualTo("TRANSFER_FAILED");
         assertThat(jdbcTemplate.queryForObject("""
                 select count(*) from ledger_entries entry
                 join transfers transfer on transfer.id = entry.transfer_id
@@ -267,6 +284,8 @@ class TransferIntegrationTests {
         CustomerAccount destination = customerWithAccount("rollback-destination@example.com");
         fund(source, "10.00");
         fund(destination, "99999999999999999.99");
+        int outboxCountBefore = jdbcTemplate.queryForObject(
+                "select count(*) from outbox_events", Integer.class);
 
         transfer(source.token(), source.accountId(), destination.accountId(), "1.00")
                 .andExpect(status().isConflict())
@@ -280,6 +299,8 @@ class TransferIntegrationTests {
         assertThat(jdbcTemplate.queryForObject(
                 "select count(*) from ledger_entries where account_id = ?::uuid",
                 Integer.class, source.accountId())).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "select count(*) from outbox_events", Integer.class)).isEqualTo(outboxCountBefore);
     }
 
     private CustomerAccount customerWithAccount(String email) throws Exception {

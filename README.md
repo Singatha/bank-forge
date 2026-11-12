@@ -2,7 +2,7 @@
 
 BankCore is a portfolio-quality, simulated online banking backend for learning backend engineering. It does not connect to banks, move real money, collect real banking credentials, or claim regulatory compliance.
 
-Milestone 6 adds persisted transfer idempotency, deterministic concurrency control, bounded pagination, correlation-aware structured logs, and append-only security and financial audit records.
+Milestone 7 adds Kafka transfer events, a PostgreSQL transactional outbox, retryable at-least-once publication, idempotent notification consumption, and dead-letter handling.
 
 ## Architecture
 
@@ -18,6 +18,10 @@ flowchart LR
     API --> Transfer[Transfer module]
     API --> Ledger[Ledger module]
     API --> Audit[Audit module]
+    Transfer --> Outbox[Transactional outbox]
+    Publisher[Outbox publisher] --> Outbox
+    Publisher --> Kafka[Apache Kafka]
+    Kafka --> Notification[Notification consumer]
     Transfer --> Ledger
     Auth --> Audit
     Account --> Audit
@@ -28,6 +32,8 @@ flowchart LR
     Transfer --> DB
     Ledger --> DB
     Audit --> DB
+    Outbox --> DB
+    Notification --> DB
     Flyway[Flyway migrations] --> DB
 ```
 
@@ -41,6 +47,7 @@ com.bankcore
 ├── transfer
 ├── transaction
 ├── ledger
+├── messaging
 ├── notification
 ├── statement
 ├── audit
@@ -53,20 +60,21 @@ com.bankcore
 
 Features gain `api`, `application`, `domain`, and `infrastructure` packages as their functionality is implemented. Empty layers are not created speculatively.
 
-See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants, [ADR-006](docs/adr/ADR-006-transfer-idempotency-and-locking.md) for transfer reliability, and [ADR-007](docs/adr/ADR-007-request-context-and-audit.md) for request context and auditing.
+See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants, [ADR-006](docs/adr/ADR-006-transfer-idempotency-and-locking.md) for transfer reliability, [ADR-007](docs/adr/ADR-007-request-context-and-audit.md) for request context and auditing, and [ADR-008](docs/adr/ADR-008-transactional-outbox-and-kafka-delivery.md) for Kafka delivery semantics.
 
 ## Technology
 
 - Java 21
 - Spring Boot 4.1
-- Spring Web MVC, Validation, Data JPA, Security, OAuth2 Resource Server, and Actuator
+- Spring Web MVC, Validation, Data JPA, Security, OAuth2 Resource Server, Kafka, and Actuator
 - PostgreSQL 17
+- Apache Kafka 3.9
 - Flyway
 - springdoc OpenAPI
 - JUnit 5 and Testcontainers
 - Maven
 
-Kafka, Redis, Prometheus, and Grafana are deliberately absent until a milestone has a concrete use for them.
+Redis, Prometheus, and Grafana are deliberately absent until a milestone has a concrete use for them.
 
 ## Prerequisites
 
@@ -76,10 +84,10 @@ Kafka, Redis, Prometheus, and Grafana are deliberately absent until a milestone 
 
 ## Run locally
 
-Copy `.env.example` to `.env` if you want to override the local defaults, then start PostgreSQL:
+Copy `.env.example` to `.env` if you want to override the local defaults, then start PostgreSQL and Kafka:
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres kafka
 ```
 
 Start the application:
@@ -92,6 +100,12 @@ To expose the simulated funding endpoint during local development, opt in explic
 
 ```bash
 DEVELOPMENT_FUNDING_ENABLED=true mvn spring-boot:run
+```
+
+Kafka publishing and consumption are disabled by default, while transfer transactions still persist outbox events. Enable the publisher and notification consumer when Kafka is running:
+
+```bash
+KAFKA_ENABLED=true mvn spring-boot:run
 ```
 
 The default database connection is `jdbc:postgresql://localhost:5432/bankcore`, with local-only username `bankcore` and password `bankcore-local`. All values can be overridden with environment variables shown in `.env.example`.
@@ -238,6 +252,26 @@ Audit rows are appended for `LOGIN_SUCCESS`, `LOGIN_FAILED`, `ACCOUNT_CREATED`, 
 
 Request completion, login outcomes, and transfer outcomes use consistent key-value logs with `service`, `requestId`, and `correlationId`. Logs are operational diagnostics; the PostgreSQL audit table is the durable business/security record.
 
+## Kafka and transactional outbox
+
+Every terminal transfer outcome appends an outbox event in the same PostgreSQL transaction as the transfer, balances, ledger, idempotency result, and audit row. A committed transfer can therefore never be missing its event, and a rolled-back transfer cannot leak one.
+
+```mermaid
+flowchart LR
+    Transfer[Transfer transaction] --> TransferRow[(Transfer and ledger)]
+    Transfer --> Outbox[(Outbox event)]
+    Publisher[Scheduled publisher] -->|claim with SKIP LOCKED| Outbox
+    Publisher -->|transfer ID key| Kafka[Kafka transfer topic]
+    Kafka --> Consumer[Notification consumer]
+    Consumer --> Dedupe[(Processed event marker)]
+    Consumer --> Notifications[(Notifications)]
+    Kafka -->|after retries| DLT[Dead-letter topic]
+```
+
+Events use the `bankcore.transfer.events.v1` topic and contain `eventId`, `eventType`, `aggregateType`, `aggregateId`, `occurredAt`, `correlationId`, and `payload`. Current event types are `TRANSFER_COMPLETED` and `TRANSFER_FAILED`. Completed events create sent and received notifications; failed events create a failure notification for the source customer. Notifications intentionally remain internal in this milestone.
+
+Publication is at least once. The publisher claims rows in separate short transactions, retries failures up to five times with backoff, and recovers stale claims after a timeout. A crash after Kafka accepts a record but before the row is marked published can produce a duplicate. The consumer prevents duplicate effects with a unique `(consumer_name, event_id)` marker inserted atomically with its notifications. Consumer failures receive two listener retries before the original key and body are routed to `bankcore.transfer.events.v1.dlt`.
+
 ## Error contract
 
 Errors never expose stack traces or database messages. Validation errors add an `errors` array to this base contract:
@@ -261,7 +295,7 @@ Errors never expose stack traces or database messages. Validation errors add an 
 
 ## Database migrations
 
-Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, `V4` owns transfers, `V5` owns immutable ledger entries and reconciliation, and `V6__create_reliability_schema.sql` owns idempotency and append-only audit records. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
+Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, `V4` owns transfers, `V5` owns immutable ledger entries and reconciliation, `V6` owns idempotency and append-only audit records, and `V7__create_event_messaging_schema.sql` owns outbox, consumer-deduplication, and notification data. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
 
 ## Tests
 
@@ -271,7 +305,7 @@ Run all tests with:
 mvn verify
 ```
 
-The 44 unit, web, and PostgreSQL Testcontainers tests cover schema version 6, authentication, customers/accounts, transfer and ledger invariants, rollback, sequential and simultaneous idempotency retries, payload conflicts, competing withdrawals, pagination bounds, correlation propagation, audit atomicity, and audit immutability. Container-backed tests are skipped only when Docker is unavailable.
+The 52 unit, web, PostgreSQL, and Kafka Testcontainers tests cover schema version 7, authentication, customers/accounts, transfer and ledger invariants, rollback, idempotency, competing withdrawals, pagination, correlation propagation, audit atomicity, atomic outbox creation, publisher state transitions, completed and failed Kafka notification delivery, duplicate events, consumer retries, and dead-letter routing. Container-backed tests are skipped only when Docker is unavailable.
 
 ## Milestone 1 acceptance criteria
 
@@ -339,3 +373,14 @@ The 44 unit, web, and PostgreSQL Testcontainers tests cover schema version 6, au
 - [x] Login, account-creation, and transfer outcomes create safe structured audit records.
 - [x] PostgreSQL prevents audit records from being updated or deleted.
 - [x] PostgreSQL concurrency tests prove idempotency and balance integrity under simultaneous requests.
+
+## Milestone 7 acceptance criteria
+
+- [x] Completed and failed transfers append versioned transfer events atomically through PostgreSQL.
+- [x] A scheduled publisher claims outbox rows safely across instances and publishes them to Kafka.
+- [x] Publication failures use bounded retries, backoff, terminal failure state, and stale-claim recovery.
+- [x] Transfer event envelopes carry stable IDs, aggregate data, occurrence time, and correlation context.
+- [x] The notification consumer creates internal notification records from completed and failed events.
+- [x] A PostgreSQL consumer/event marker prevents duplicate Kafka delivery from creating duplicate effects.
+- [x] Failed consumer records receive bounded retries before routing to a dead-letter topic.
+- [x] PostgreSQL and Kafka Testcontainers tests prove atomicity, delivery, deduplication, and DLT behavior.

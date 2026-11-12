@@ -24,6 +24,8 @@ import com.bankcore.audit.domain.AuditAction;
 import com.bankcore.audit.domain.AuditResourceType;
 import com.bankcore.customer.infrastructure.CustomerRepository;
 import com.bankcore.ledger.application.LedgerService;
+import com.bankcore.messaging.application.OutboxService;
+import com.bankcore.messaging.domain.EventType;
 import com.bankcore.transfer.domain.Transfer;
 import com.bankcore.transfer.domain.TransferException;
 import com.bankcore.transfer.domain.IdempotencyException;
@@ -45,6 +47,7 @@ public class TransferService {
     private final IdempotencyService idempotencyService;
     private final TransferRequestFingerprint requestFingerprint;
     private final AuditService auditService;
+    private final OutboxService outboxService;
     private final Clock clock;
 
     public TransferService(TransferRepository transferRepository,
@@ -55,6 +58,7 @@ public class TransferService {
                            IdempotencyService idempotencyService,
                            TransferRequestFingerprint requestFingerprint,
                            AuditService auditService,
+                           OutboxService outboxService,
                            Clock clock) {
         this.transferRepository = transferRepository;
         this.accountRepository = accountRepository;
@@ -64,6 +68,7 @@ public class TransferService {
         this.idempotencyService = idempotencyService;
         this.requestFingerprint = requestFingerprint;
         this.auditService = auditService;
+        this.outboxService = outboxService;
         this.clock = clock;
     }
 
@@ -118,6 +123,7 @@ public class TransferService {
                     transfer.getId(), Map.of(
                             "reference", transfer.getReference(),
                             "reason", exception.code()));
+            outboxService.appendTransferEvent(transfer, EventType.TRANSFER_FAILED, now);
             transferRepository.saveAndFlush(transfer);
             LOGGER.warn("transfer_failed transferId={} sourceAccountId={} destinationAccountId={} reason={}",
                     transfer.getId(), sourceAccountId, destinationAccountId, exception.code());
@@ -131,6 +137,7 @@ public class TransferService {
         attempt.record().complete(transfer.getId(), now);
         auditService.record(actor.userId(), AuditAction.TRANSFER_COMPLETED, AuditResourceType.TRANSFER,
                 transfer.getId(), Map.of("reference", transfer.getReference()));
+        outboxService.appendTransferEvent(transfer, EventType.TRANSFER_COMPLETED, now);
         Transfer completed = transferRepository.saveAndFlush(transfer);
         LOGGER.info("transfer_completed transferId={} sourceAccountId={} destinationAccountId={}",
                 transfer.getId(), sourceAccountId, destinationAccountId);

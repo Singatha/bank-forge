@@ -35,11 +35,11 @@ class BankCoreApplicationTests {
     @Test
     void contextStartsAndAllMigrationsAreApplied() {
         assertThat(flyway.info().current()).isNotNull();
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("6");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("7");
 
         Integer successfulMigrations = jdbcTemplate.queryForObject(
                 "select count(*) from flyway_schema_history where success", Integer.class);
-        assertThat(successfulMigrations).isEqualTo(6);
+        assertThat(successfulMigrations).isEqualTo(7);
     }
 
     @Test

@@ -21,6 +21,19 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      ack-mode: record
 
 server:
   shutdown: graceful
@@ -58,4 +71,16 @@ bankcore:
     refresh-token-ttl: ${REFRESH_TOKEN_TTL:30d}
   features:
     development-funding-enabled: ${DEVELOPMENT_FUNDING_ENABLED:false}
+  messaging:
+    enabled: ${KAFKA_ENABLED:false}
+    transfer-topic: ${TRANSFER_TOPIC:bankcore.transfer.events.v1}
+    dead-letter-topic: ${TRANSFER_DLT_TOPIC:bankcore.transfer.events.v1.dlt}
+    notification-consumer-group: ${NOTIFICATION_CONSUMER_GROUP:bankcore-notifications-v1}
+    publisher-batch-size: ${OUTBOX_BATCH_SIZE:50}
+    max-publish-attempts: ${OUTBOX_MAX_ATTEMPTS:5}
+    publish-timeout: ${OUTBOX_PUBLISH_TIMEOUT:5s}
+    retry-delay: ${OUTBOX_RETRY_DELAY:5s}
+    processing-timeout: ${OUTBOX_PROCESSING_TIMEOUT:1m}
+    publisher-fixed-delay: ${OUTBOX_PUBLISHER_DELAY:1s}
+    publisher-initial-delay: ${OUTBOX_PUBLISHER_INITIAL_DELAY:5s}
 
