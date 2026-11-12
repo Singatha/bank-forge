@@ -1,12 +1,9 @@
 package com.bankcore.account.api;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.UUID;
-
 import org.springframework.security.oauth2.jwt.Jwt;
 
 import com.bankcore.account.application.AccountActor;
+import com.bankcore.shared.web.JwtClaims;
 
 final class AccountControllerSupport {
 
@@ -14,9 +11,6 @@ final class AccountControllerSupport {
     }
 
     static AccountActor actor(Jwt jwt) {
-        List<String> claimedRoles = jwt.getClaimAsStringList("roles");
-        return new AccountActor(
-                UUID.fromString(jwt.getSubject()),
-                claimedRoles == null ? new HashSet<>() : new HashSet<>(claimedRoles));
+        return new AccountActor(JwtClaims.subject(jwt), JwtClaims.roles(jwt));
     }
 }

@@ -5,11 +5,17 @@ import java.util.UUID;
 
 import org.springframework.security.oauth2.jwt.Jwt;
 
+import com.bankcore.shared.web.JwtClaims;
+
 public record CurrentUserResponse(UUID id, String email, List<String> roles) {
+
+    public CurrentUserResponse {
+        roles = List.copyOf(roles);
+    }
 
     public static CurrentUserResponse from(Jwt jwt) {
         return new CurrentUserResponse(
-                UUID.fromString(jwt.getSubject()),
+                JwtClaims.subject(jwt),
                 jwt.getClaimAsString("email"),
                 jwt.getClaimAsStringList("roles"));
     }

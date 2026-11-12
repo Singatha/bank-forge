@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- Spring owns and injects these mutable collaborators; retaining them is intentional. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+        <Or>
+            <Class name="com.bankcore.config.JsonAccessDeniedHandler"/>
+            <Class name="com.bankcore.config.JsonAuthenticationEntryPoint"/>
+            <Class name="com.bankcore.config.SecurityErrorWriter"/>
+            <Class name="com.bankcore.messaging.application.OutboxPublisher"/>
+            <Class name="com.bankcore.notification.application.NotificationEventConsumer"/>
+            <Class name="com.bankcore.observability.application.BankCoreMetrics"/>
+            <Class name="com.bankcore.observability.infrastructure.KafkaHealthIndicator"/>
+            <Class name="com.bankcore.ratelimit.application.RateLimitService"/>
+            <Class name="com.bankcore.transfer.application.TransferService"/>
+            <Class name="com.bankcore.transfer.infrastructure.IdempotencyLock"/>
+        </Or>
+    </Match>
+
+    <!-- JPA constructs this validated entity; it has no finalizer and cannot be final for Hibernate. -->
+    <Match>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+        <Class name="com.bankcore.ledger.domain.LedgerEntry"/>
+    </Match>
+</FindBugsFilter>

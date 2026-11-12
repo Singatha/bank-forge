@@ -24,6 +24,7 @@ import org.springframework.data.domain.Sort;
 import com.bankcore.account.application.AccountService;
 import com.bankcore.shared.api.PageRequests;
 import com.bankcore.shared.api.PageResponse;
+import com.bankcore.shared.web.JwtClaims;
 
 @RestController
 @RequestMapping("/api/v1/accounts")
@@ -44,7 +45,7 @@ public class AccountController {
     public AccountResponse create(@AuthenticationPrincipal Jwt jwt,
                                   @Valid @RequestBody CreateAccountRequest request) {
         return AccountResponse.from(accountService.create(
-                UUID.fromString(jwt.getSubject()), request.accountType(), request.currency()));
+                JwtClaims.subject(jwt), request.accountType(), request.currency()));
     }
 
     @GetMapping

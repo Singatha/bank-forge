@@ -1,7 +1,5 @@
 package com.bankcore.transfer.api;
 
-import java.util.HashSet;
-import java.util.List;
 import java.util.UUID;
 
 import jakarta.validation.Valid;
@@ -31,6 +29,7 @@ import com.bankcore.transfer.application.TransferService;
 import com.bankcore.transfer.application.TransferResult;
 import com.bankcore.shared.api.PageRequests;
 import com.bankcore.shared.api.PageResponse;
+import com.bankcore.shared.web.JwtClaims;
 
 @RestController
 @RequestMapping("/api/v1/transfers")
@@ -88,9 +87,6 @@ public class TransferController {
     }
 
     private AccountActor actor(Jwt jwt) {
-        List<String> claimedRoles = jwt.getClaimAsStringList("roles");
-        return new AccountActor(
-                UUID.fromString(jwt.getSubject()),
-                claimedRoles == null ? new HashSet<>() : new HashSet<>(claimedRoles));
+        return new AccountActor(JwtClaims.subject(jwt), JwtClaims.roles(jwt));
     }
 }

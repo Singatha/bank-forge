@@ -1,6 +1,10 @@
 target/
 .git/
+.github/
 .idea/
 .vscode/
 README.md
+docs/
+ops/
+performance/
 

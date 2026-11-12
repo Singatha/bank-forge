@@ -1,0 +1,45 @@
+name: Performance smoke test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 3 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Start BankCore
+        run: docker compose up -d --build bankcore-api
+
+      - name: Run authenticated k6 smoke profile
+        run: >-
+          docker run --rm --network bankcore_default
+          --volume "$PWD/performance:/scripts:ro"
+          grafana/k6:2.3.0 run
+          --env BASE_URL=http://bankcore-api:8080
+          /scripts/smoke.js
+
+      - name: Capture service logs
+        if: always()
+        run: docker compose logs --no-color > compose-performance.log
+
+      - name: Upload service logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: performance-service-logs
+          if-no-files-found: warn
+          retention-days: 7
+          path: compose-performance.log
+
+      - name: Stop BankCore
+        if: always()
+        run: docker compose down --volumes

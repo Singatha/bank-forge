@@ -2,7 +2,7 @@
 
 BankCore is a portfolio-quality, simulated online banking backend for learning backend engineering. It does not connect to banks, move real money, collect real banking credentials, or claim regulatory compliance.
 
-Milestone 8 adds Redis-backed API rate limiting, Micrometer application metrics, Prometheus scraping, a provisioned Grafana dashboard, and dependency-aware readiness checks.
+Milestone 9 adds CI quality gates, expanded dependency-failure integration coverage, static analysis, coverage enforcement, dependency scanning, a non-root production image, k6 smoke testing, and maintained architecture documentation.
 
 ## Architecture
 
@@ -66,7 +66,7 @@ com.bankcore
 
 Features gain `api`, `application`, `domain`, and `infrastructure` packages as their functionality is implemented. Empty layers are not created speculatively.
 
-See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants, [ADR-006](docs/adr/ADR-006-transfer-idempotency-and-locking.md) for transfer reliability, [ADR-007](docs/adr/ADR-007-request-context-and-audit.md) for request context and auditing, [ADR-008](docs/adr/ADR-008-transactional-outbox-and-kafka-delivery.md) for Kafka delivery semantics, and [ADR-009](docs/adr/ADR-009-redis-rate-limiting-and-observability.md) for rate limiting and observability.
+The detailed [architecture overview](docs/architecture.md) describes module ownership, runtime flows, consistency boundaries, delivery controls, and known production gaps. See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith decision, [ADR-002](docs/adr/ADR-002-authentication-tokens.md) for the token model, [ADR-003](docs/adr/ADR-003-account-access-and-simulated-funding.md) for account access, [ADR-004](docs/adr/ADR-004-transfer-transactions.md) for transfer transaction boundaries, [ADR-005](docs/adr/ADR-005-append-only-ledger.md) for ledger invariants, [ADR-006](docs/adr/ADR-006-transfer-idempotency-and-locking.md) for transfer reliability, [ADR-007](docs/adr/ADR-007-request-context-and-audit.md) for request context and auditing, [ADR-008](docs/adr/ADR-008-transactional-outbox-and-kafka-delivery.md) for Kafka delivery semantics, [ADR-009](docs/adr/ADR-009-redis-rate-limiting-and-observability.md) for rate limiting and observability, and [ADR-010](docs/adr/ADR-010-production-quality-gates-and-container-delivery.md) for production engineering gates.
 
 ## Technology
 
@@ -81,7 +81,8 @@ See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith dec
 - Grafana
 - springdoc OpenAPI
 - JUnit 5 and Testcontainers
-- Maven
+- Maven with JaCoCo, Checkstyle, SpotBugs, and OWASP Dependency-Check
+- GitHub Actions and k6
 
 ## Prerequisites
 
@@ -91,16 +92,17 @@ See [ADR-001](docs/adr/ADR-001-modular-monolith.md) for the modular-monolith dec
 
 ## Run locally
 
-Copy `.env.example` to `.env` if you want to override the local defaults, then start PostgreSQL, Kafka, Redis, Prometheus, and Grafana:
+Copy `.env.example` to `.env` if you want to override the local defaults, then build and start the complete API, PostgreSQL, Kafka, Redis, Prometheus, and Grafana topology:
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Start the application:
+The API is available at `http://localhost:8080` after its readiness check passes. To run the application from Maven instead, start only its dependencies:
 
 ```bash
-mvn spring-boot:run
+docker compose up -d postgres kafka redis
+KAFKA_ENABLED=true RATE_LIMITING_ENABLED=true mvn spring-boot:run
 ```
 
 To expose the simulated funding endpoint during local development, opt in explicitly:
@@ -121,7 +123,7 @@ Rate limiting is also disabled by default. Enable it when Redis is running:
 RATE_LIMITING_ENABLED=true mvn spring-boot:run
 ```
 
-Flags can be combined. With the application running on port 8080, Prometheus scrapes it through `host.docker.internal`; Grafana is provisioned with the Prometheus data source and the BankCore Overview dashboard.
+Flags can be combined. The complete Compose topology connects Prometheus to the containerized API and provisions Grafana with the Prometheus data source and the BankCore Overview dashboard. Prometheus in that topology does not scrape an application started directly on the host.
 
 The default database connection is `jdbc:postgresql://localhost:5432/bankcore`, with local-only username `bankcore` and password `bankcore-local`. All values can be overridden with environment variables shown in `.env.example`.
 
@@ -339,6 +341,30 @@ Errors never expose stack traces or database messages. Validation errors add an 
 
 Migrations live in `src/main/resources/db/migration`. `V1` establishes the baseline, `V2` owns identity data, `V3` owns customers/accounts, `V4` owns transfers, `V5` owns immutable ledger entries and reconciliation, `V6` owns idempotency and append-only audit records, and `V7__create_event_messaging_schema.sql` owns outbox, consumer-deduplication, and notification data. On startup, Flyway validates and applies pending migrations before JPA initializes. Hibernate uses `ddl-auto=validate`, so it cannot mutate the schema.
 
+## Production engineering
+
+The pull-request workflow runs the complete Maven verification lifecycle and then proves that the production image builds. `mvn verify` includes the test suite, Checkstyle, SpotBugs, and a JaCoCo bundle line-coverage floor of 60%. Reports are written below `target/site` and retained as CI artifacts.
+
+GitHub's dependency review checks pull-request dependency changes. A separate weekly or manually dispatched security workflow runs OWASP Dependency-Check so NVD feed availability does not destabilize the primary build. Supply an NVD API key as the `NVD_API_KEY` repository secret for reliable updates. The first local database update can take considerably longer than subsequent scans:
+
+```bash
+NVD_API_KEY=<key> mvn -Pdependency-scan -DskipTests -Djacoco.skip=true verify
+```
+
+The multi-stage Dockerfile builds the executable jar and runs it from a Java 21 JRE as the unprivileged `bankcore` user. CI builds this image but deliberately does not publish it; registry selection, signing, and deployment promotion are outside this repository's current scope.
+
+The scheduled and manually dispatched performance workflow starts the Compose topology and runs `performance/smoke.js`. To run its default 5-VU, 30-second profile locally after `docker compose up -d --build`:
+
+```bash
+docker run --rm --network bankcore_default \
+  -v "$PWD/performance:/scripts:ro" \
+  grafana/k6:2.3.0 run \
+  -e BASE_URL=http://bankcore-api:8080 \
+  /scripts/smoke.js
+```
+
+The script fails if checks fall to 99% or lower, request failures reach 1%, p95 reaches 500 ms, or p99 reaches one second. These thresholds detect broad regressions in the local topology; they are not production capacity claims.
+
 ## Tests
 
 Run all tests with:
@@ -347,7 +373,7 @@ Run all tests with:
 mvn verify
 ```
 
-The 57 unit, web, PostgreSQL, Kafka, and Redis Testcontainers tests cover schema version 7, authentication, customers/accounts, transfer and ledger invariants, rollback, idempotency, competing withdrawals, pagination, correlation propagation, audit atomicity, atomic outbox creation, publisher state transitions, completed and failed Kafka notification delivery, duplicate events, consumer retries, dead-letter routing, rate-limit isolation, fail-closed behavior and rejection, Prometheus export, and dependency-aware readiness. Container-backed tests are skipped only when Docker is unavailable.
+The 58 unit, web, PostgreSQL, Kafka, and Redis Testcontainers tests cover schema version 7, authentication, customers/accounts, transfer and ledger invariants, rollback, idempotency, competing withdrawals, pagination, correlation propagation, audit atomicity, atomic outbox creation, publisher state transitions, completed and failed Kafka notification delivery, duplicate events, consumer retries, dead-letter routing, rate-limit isolation, fail-closed behavior and rejection, Prometheus export, and dependency-aware readiness. The production-readiness test starts all three dependencies, stops Redis, and proves that readiness and protected traffic fail while process liveness remains healthy. Container-backed tests are skipped only when Docker is unavailable.
 
 ## Milestone 1 acceptance criteria
 
@@ -437,3 +463,14 @@ The 57 unit, web, PostgreSQL, Kafka, and Redis Testcontainers tests cover schema
 - [x] Prometheus scraping and a provisioned Grafana overview dashboard are included in Docker Compose.
 - [x] Liveness is process-only while readiness reflects enabled PostgreSQL, Redis, and Kafka dependencies.
 - [x] Redis-backed integration tests prove throttling, metric export, and readiness behavior.
+
+## Milestone 9 acceptance criteria
+
+- [x] GitHub Actions verifies every pull request and builds the production image without publishing it.
+- [x] Testcontainers coverage proves liveness, readiness, and fail-closed behavior during an enabled dependency outage.
+- [x] Checkstyle and SpotBugs run as mandatory Maven verification gates with narrowly documented exclusions.
+- [x] JaCoCo publishes an HTML report and enforces a 60% bundle line-coverage baseline.
+- [x] Pull-request dependency review and scheduled OWASP Dependency-Check scanning are configured.
+- [x] A multi-stage Java 21 image runs the application as a non-root user with a readiness health check.
+- [x] A k6 scenario exercises registration, login, health, and authenticated traffic with enforceable thresholds.
+- [x] The architecture overview and ADR-010 document runtime boundaries, delivery controls, trade-offs, and known gaps.

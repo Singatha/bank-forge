@@ -14,6 +14,10 @@ public record PageResponse<T>(
         boolean first,
         boolean last) {
 
+    public PageResponse {
+        content = List.copyOf(content);
+    }
+
     public static <S, T> PageResponse<T> from(Page<S> source, Function<S, T> mapper) {
         return new PageResponse<>(
                 source.getContent().stream().map(mapper).toList(),

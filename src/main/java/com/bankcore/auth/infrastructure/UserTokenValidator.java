@@ -22,10 +22,14 @@ public class UserTokenValidator implements OAuth2TokenValidator<Jwt> {
 
     @Override
     public OAuth2TokenValidatorResult validate(Jwt jwt) {
+        String subject = jwt.getSubject();
+        if (subject == null) {
+            return OAuth2TokenValidatorResult.failure(INVALID_USER);
+        }
         UUID userId;
         try {
-            userId = UUID.fromString(jwt.getSubject());
-        } catch (RuntimeException exception) {
+            userId = UUID.fromString(subject);
+        } catch (IllegalArgumentException exception) {
             return OAuth2TokenValidatorResult.failure(INVALID_USER);
         }
 

@@ -10,6 +10,10 @@ import com.bankcore.auth.domain.User;
 
 public record UserResponse(UUID id, String email, List<String> roles, Instant createdAt) {
 
+    public UserResponse {
+        roles = List.copyOf(roles);
+    }
+
     public static UserResponse from(User user) {
         List<String> roles = user.getRoles().stream()
                 .map(Role::getName)

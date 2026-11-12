@@ -1,7 +1,5 @@
 package com.bankcore.customer.api;
 
-import java.util.UUID;
-
 import jakarta.validation.Valid;
 
 import io.swagger.v3.oas.annotations.Operation;
@@ -19,6 +17,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.bankcore.customer.application.CustomerService;
+import com.bankcore.shared.web.JwtClaims;
 
 @RestController
 @RequestMapping("/api/v1/customers")
@@ -39,7 +38,7 @@ public class CustomerController {
     public CustomerResponse create(@AuthenticationPrincipal Jwt jwt,
                                    @Valid @RequestBody CreateCustomerProfileRequest request) {
         return CustomerResponse.from(customerService.createProfile(
-                UUID.fromString(jwt.getSubject()),
+                JwtClaims.subject(jwt),
                 jwt.getClaimAsString("email"),
                 request.firstName(),
                 request.lastName(),
@@ -50,6 +49,6 @@ public class CustomerController {
     @PreAuthorize("hasRole('CUSTOMER')")
     @Operation(summary = "Get the authenticated user's customer profile")
     public CustomerResponse me(@AuthenticationPrincipal Jwt jwt) {
-        return CustomerResponse.from(customerService.getOwnProfile(UUID.fromString(jwt.getSubject())));
+        return CustomerResponse.from(customerService.getOwnProfile(JwtClaims.subject(jwt)));
     }
 }
